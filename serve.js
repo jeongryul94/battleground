@@ -19,12 +19,13 @@ const server = http.createServer((req, res) => {
 // ───────────────────────── minimal WebSocket (RFC 6455, text frames)
 class Conn {
   constructor(sock) {
-    this.sock = sock; this.buf = Buffer.alloc(0); this.frag = null; this.closed = false;
+    this.sock = sock; this.buf = Buffer.alloc(0); this.frag = null; this.closed = false; this.lastSeen = Date.now();
     sock.on('data', d => { try { this.onData(d); } catch (e) { console.error('ws frame error', e.message); this.close(); } });
     sock.on('close', () => { if (!this.closed) { this.closed = true; this.onclose?.(); } });
     sock.on('error', () => {});
   }
   onData(d) {
+    this.lastSeen = Date.now();
     this.buf = Buffer.concat([this.buf, d]);
     for (;;) {
       if (this.buf.length < 2) return;
@@ -108,7 +109,8 @@ function onConnect(conn) {
 function handle(p, m) {
   switch (m.t) {
     case 'start': {
-      if (p.id !== hostId || phase !== 'lobby' || !Z) return;
+      if (p.id !== hostId) { p.conn.send({ t: 'notice', text: '방장만 경기를 시작할 수 있습니다' }); sendLobby(); return; }
+      if (phase !== 'lobby' || !Z) return;
       const seed = (Math.random() * 2 ** 31) | 0;
       const bots = Math.max(0, Math.min(59, m.bots | 0));
       match = { seed, plan: Z.zonePlan(seed, terrainH), startAt: Date.now(), bots, botsAlive: bots, opened: new Set(), dropN: 0 };
@@ -218,6 +220,19 @@ function zoneTick() {
     if (p.hp <= 0) killPlayer(p, null, null, '자기장');
   }
 }
+
+// heartbeat: browsers answer pings automatically; anyone silent for 30 s is gone (keeps ghosts from holding the host seat)
+setInterval(() => {
+  const now = Date.now();
+  for (const p of players.values()) {
+    if (now - p.conn.lastSeen > 30000) { console.log('timeout', p.name); p.conn.sock.destroy(); continue; }
+    try { p.conn.frame(9, Buffer.alloc(0)); } catch {}
+  }
+}, 10000);
+// exactly one host at all times
+setInterval(() => {
+  if (players.size && (!hostId || !players.has(hostId))) { hostId = players.keys().next().value; broadcast({ t: 'host', hostId }); sendLobby(); }
+}, 2000);
 
 (async () => {
   Z = await import('./zone.mjs');

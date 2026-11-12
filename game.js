@@ -1674,7 +1674,18 @@ function spawnBots(n, spawn) {
 function pickSpawn() { return landing || landPoint(0, 0, 500, 500, 4, 200) || new THREE.Vector3(-100, 17, 160); }
 function beginPlay() {
   $('start').classList.add('hidden'); $('hud').classList.remove('hidden');
-  state = 'play'; canvas.requestPointerLock();
+  // typing in the lobby chat would otherwise swallow WASD
+  if (document.activeElement && document.activeElement !== document.body) document.activeElement.blur();
+  if (typeof closeChat === 'function' && chatOpen) closeChat();
+  state = 'play';
+  const ready = () => {
+    if (document.pointerLockElement === canvas) return;
+    $('pausetitle').textContent = '준비 완료!';
+    $('pausehint').textContent = '화면을 클릭하면 시작합니다';
+    $('pause').classList.remove('hidden');
+  };
+  try { const r = canvas.requestPointerLock(); if (r && r.catch) r.catch(ready); } catch { ready(); }
+  setTimeout(ready, 400); // browsers without the promise form
 }
 // single player
 function startGame() {
@@ -1731,16 +1742,32 @@ function renderLobby() {
     info.innerHTML = `같은 네트워크의 친구는 ${addrs || '이 PC의 IP 주소'} 로 접속하면 됩니다.<br>인터넷 친구와 하려면 <b>start_online.bat</b>로 실행하세요.`;
   } else info.innerHTML = `친구에게 이 주소를 보내세요: <code>${location.origin}</code>`;
   list.innerHTML = NET.lobby.map(p => `<li>${p.id === NET.hostId ? '👑 ' : ''}${escapeHtml(p.name)}${p.id === NET.id ? ' <small>(나)</small>' : ''}${p.inMatch ? ' <small>· 경기 중</small>' : ''}</li>`).join('');
-  const amHost = NET.id === NET.hostId;
+  const amHost = !!NET.id && NET.id === NET.hostId;
+  const hostName = (NET.lobby.find(p => p.id === NET.hostId) || {}).name || '-';
+  info.innerHTML += `<br>방장: <b>${escapeHtml(hostName)}</b> · 접속 서버 <code>${escapeHtml(location.host)}</code> · ${NET.lobby.length}명 접속 중<br><small>친구 목록에 서로가 안 보이면 다른 서버 주소로 들어온 것입니다. 같은 주소로 접속하세요.</small>`;
   $('hostctl').classList.toggle('hidden', !amHost || NET.phase !== 'lobby');
   $('waitmsg').textContent = NET.phase === 'match' ? '경기가 진행 중입니다. 끝나면 다음 경기에 참가할 수 있습니다.' : amHost ? '' : '방장이 경기를 시작하기를 기다리는 중…';
   if (amHost && !$('botn').dataset.touched) { const v = Math.max(0, (+store.get('gh_bots') || 20) - NET.lobby.length); $('botn').value = v; $('botnv').textContent = v; }
 }
 const escapeHtml = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 function getRemote(id, name, human) { return actorById.get(id) || new RemoteActor(id, name || id, human); }
+function resetWorld() {
+  for (const a of actors) scene.remove(a.rig.root);
+  actors.length = 0; bots.length = 0; actorById.clear();
+  if (player?.muzzleLight) scene.remove(player.muzzleLight);
+  player = null;
+  for (const r of rockets) scene.remove(r.m); rockets.length = 0;
+  spec.on = false; lastKiller = null; $('hud').classList.remove('spectating');
+  invOpen = false; $('invwin').classList.add('hidden');
+  for (const id of ['end', 'pause']) $(id).classList.add('hidden');
+  $('feed').innerHTML = ''; $('dmgnums').innerHTML = '';
+  Object.assign(zone, { phase: 0, stage: 'wait', t: 0, cur: { x: 0, z: 0, r: 900 }, next: null, dps: 0.5, tick: 0 });
+  now = 0; firing = aiming = false; for (const k in keys) keys[k] = false;
+}
 function startMatch(m) {
-  if (state === 'play' || state === 'ending') return;
-  NET.on = true; NET.hostId = m.hostId; NET.isHost = m.hostId === NET.id; NET.alive = m.players.length + m.bots; matchTotal = NET.alive;
+  if (state === 'play' || state === 'ending' || state === 'loading') return;
+  if (state === 'end' || player) resetWorld();
+  NET.on = true; NET.hostId = m.hostId; NET.isHost = !!NET.id && m.hostId === NET.id; NET.alive = m.players.length + m.bots; matchTotal = NET.alive;
   NET.names = new Map(m.players.map(p => [p.id, p.name]));
   initAudio();
   zplan = m.plan; placeCrates(m.seed);
@@ -1819,12 +1846,13 @@ function onNet(m) {
     case 'welcome': NET.connected = true; NET.id = m.id; NET.hostId = m.hostId; NET.phase = m.phase; NET.ips = m.ips || []; NET.port = m.port; renderLobby(); break;
     case 'lobby': NET.lobby = m.players; NET.hostId = m.hostId; NET.phase = m.phase; renderLobby(); break;
     case 'host': {
-      const was = NET.isHost; NET.hostId = m.hostId; NET.isHost = NET.on && m.hostId === NET.id;
+      const was = NET.isHost; NET.hostId = m.hostId; NET.isHost = NET.on && !!NET.id && m.hostId === NET.id;
       if (NET.isHost && !was) { promoteBots(); toast('방장이 되었습니다 — 봇 계산을 이어받습니다'); }
       renderLobby(); break;
     }
     case 'start': startMatch(m); break;
     case 'chat': addChat(m); break;
+    case 'notice': toast(m.text); $('waitmsg').textContent = m.text; break;
     case 'state': if (NET.on && m.id !== NET.id) getRemote(m.id, NET.names.get(m.id), true).push(m); break;
     case 'bots': if (NET.on && !NET.isHost) for (const s of m.b) getRemote(s.id, s.n, false).push(s); break;
     case 'shot': {
@@ -1908,6 +1936,7 @@ $('pause').addEventListener('click', e => { if (e.target.tagName !== 'INPUT') ca
 let lockChangeT = 0;
 document.addEventListener('pointerlockchange', () => {
   const locked = document.pointerLockElement === canvas;
+  if (locked) { $('pausetitle').textContent = '일시정지'; $('pausehint').textContent = '화면을 클릭하면 계속합니다'; }
   lockChangeT = performance.now();
   $('pause').classList.toggle('hidden', locked || invOpen || state !== 'play' || (player && player.dead));
   $('pausenote').textContent = NET.on ? '멀티 경기 중에는 게임이 멈추지 않습니다!' : '';
