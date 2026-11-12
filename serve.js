@@ -83,7 +83,7 @@ function onConnect(conn) {
     if (!me) {
       if (m.t !== 'hello') return;
       const name = String(m.name || '').replace(/[<>&"']/g, '').trim().slice(0, 12) || '생존자';
-      me = { id: 'p' + nextId++, name, conn, inMatch: false, alive: false, hp: 100, armor: 0, pos: [0, 0, 0], kills: 0 };
+      me = { id: 'p' + nextId++, name, conn, inMatch: false, alive: false, hp: 100, gear: { vest: null, helm: null }, pos: [0, 0, 0], kills: 0 };
       players.set(me.id, me);
       if (!hostId || !players.has(hostId)) hostId = me.id;
       conn.send({ t: 'welcome', id: me.id, hostId, phase, ips: lanIPs(), port });
@@ -111,7 +111,7 @@ function handle(p, m) {
       const bots = Math.max(0, Math.min(40, m.bots | 0));
       match = { seed, plan: Z.zonePlan(seed, terrainH), startAt: Date.now(), bots, botsAlive: bots, opened: new Set(), dropN: 0 };
       phase = 'match';
-      for (const q of players.values()) Object.assign(q, { inMatch: true, alive: true, hp: 100, armor: 0, kills: 0 });
+      for (const q of players.values()) Object.assign(q, { inMatch: true, alive: true, hp: 100, gear: { vest: null, helm: null }, kills: 0 });
       broadcast({ t: 'start', seed, plan: match.plan, bots, hostId, players: lobbyList() });
       match.timer = setInterval(zoneTick, 1000);
       console.log(`match started: ${players.size} players + ${bots} bots`);
@@ -127,10 +127,16 @@ function handle(p, m) {
       if (String(m.target).startsWith('p')) {
         const tp = players.get(m.target);
         if (!tp || !tp.alive) return;
+        // same armour rule as the client: the piece hit soaks a share and wears down
         let amt = dmg;
-        if (tp.armor > 0 && m.by) { const a = Math.min(tp.armor, amt * 0.5); tp.armor -= a; amt -= a; }
+        const key = m.head ? 'helm' : 'vest', pc = tp.gear[key];
+        if (pc && m.by) {
+          const ab = amt * ([0, 0.3, 0.4, 0.55][pc.lvl] || 0);
+          pc.d -= ab * (1.6 - 0.3 * pc.lvl); amt -= ab;
+          if (pc.d <= 0) tp.gear[key] = null;
+        }
         tp.hp -= amt;
-        tp.conn.send({ t: 'hp', hp: tp.hp, armor: tp.armor, by: m.by });
+        tp.conn.send({ t: 'hp', hp: tp.hp, gear: tp.gear, by: m.by });
         if (tp.hp <= 0) killPlayer(tp, m.by, m.bn, m.w);
       } else {
         host()?.conn.send({ t: 'botHit', target: m.target, dmg, head: !!m.head, w: m.w, by: m.by });
@@ -144,10 +150,28 @@ function handle(p, m) {
       announceKill({ victim: m.id, victimName: m.name, by: m.by, byName: killer ? killer.name : m.bn, w: m.w, pos: m.pos });
       break;
     }
-    case 'open': if (match && !match.opened.has(m.id)) { match.opened.add(m.id); broadcast({ t: 'crate', id: m.id, by: p.id }); } break;
-    case 'heal': if (p.alive) { p.hp = Math.min(100, p.hp + Math.min(45, +m.amt || 0)); p.conn.send({ t: 'hp', hp: p.hp, armor: p.armor }); } break;
-    case 'armor': if (p.alive) { p.armor = Math.min(100, p.armor + Math.min(50, +m.amt || 0)); p.conn.send({ t: 'hp', hp: p.hp, armor: p.armor }); } break;
-    case 'selfdmg': if (p.alive) { p.hp -= Math.max(0, +m.amt || 0); p.conn.send({ t: 'hp', hp: p.hp, armor: p.armor }); if (p.hp <= 0) killPlayer(p, null, null, m.w || '낙하'); } break;
+    // first request for an item wins; everyone is told who got it
+    case 'take': {
+      if (!match) return;
+      const key = m.c + ':' + (m.i | 0);
+      if (match.opened.has(key)) return;
+      match.opened.add(key); broadcast({ t: 'took', c: m.c, i: m.i | 0, by: p.id });
+      break;
+    }
+    case 'drop': case 'deathbox': {
+      if (!match || !Array.isArray(m.items) || !Array.isArray(m.pos)) return;
+      const items = m.items.slice(0, 24).filter(it => it && typeof it.k === 'string');
+      if (!items.length) return;
+      broadcast({ t: 'box', id: 'g' + match.dropN++, kind: m.t === 'deathbox' ? 'death' : 'ground', items, pos: m.pos.slice(0, 3).map(Number) });
+      break;
+    }
+    case 'gear': {
+      const clean = g => (g && g.lvl >= 1 && g.lvl <= 3 ? { lvl: g.lvl | 0, d: Math.max(0, Math.min(100, +g.d || 0)) } : null);
+      p.gear = { vest: clean(m.vest), helm: clean(m.helm) };
+      break;
+    }
+    case 'heal': if (p.alive) { const cap = Math.min(100, +m.cap || 100); if (p.hp < cap) p.hp = Math.min(cap, p.hp + Math.min(100, +m.amt || 0)); p.conn.send({ t: 'hp', hp: p.hp, gear: p.gear }); } break;
+    case 'selfdmg': if (p.alive) { p.hp -= Math.max(0, +m.amt || 0); p.conn.send({ t: 'hp', hp: p.hp, gear: p.gear }); if (p.hp <= 0) killPlayer(p, null, null, m.w || '낙하'); } break;
   }
 }
 
@@ -158,7 +182,6 @@ function killPlayer(tp, by, bn, w) {
 }
 function announceKill(k) {
   if (!match) return;
-  k.drop = 'd' + match.dropN++;
   k.alive = aliveTotal();
   k.rank = k.alive + 1;
   broadcast({ t: 'kill', ...k });
@@ -183,7 +206,7 @@ function zoneTick() {
   const z = Z.zoneAt(match.plan, (Date.now() - match.startAt) / 1000);
   for (const p of alivePlayers()) {
     if (Math.hypot(p.pos[0] - z.cur.x, p.pos[2] - z.cur.z) <= z.cur.r) continue;
-    p.hp -= z.dps; p.conn.send({ t: 'hp', hp: p.hp, armor: p.armor, zone: 1 });
+    p.hp -= z.dps; p.conn.send({ t: 'hp', hp: p.hp, gear: p.gear, zone: 1 });
     if (p.hp <= 0) killPlayer(p, null, null, '자기장');
   }
 }

@@ -86,6 +86,31 @@
   #endstats{color:var(--dim);font-size:18px;margin-bottom:24px;line-height:1.7}
   #endstats b{color:var(--fg)}
   .center{text-align:center}
+  #invbar{display:flex;gap:12px;margin-top:10px;font-size:13px;color:var(--dim);flex-wrap:wrap}
+  #invbar b{color:var(--fg)}
+  #invwin{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:min(980px,94vw);max-height:84vh;display:flex;flex-direction:column;background:rgba(10,15,17,.92);border:1px solid rgba(255,255,255,.14);border-radius:10px;pointer-events:auto;box-shadow:0 20px 60px rgba(0,0,0,.5)}
+  .invhead{display:flex;align-items:center;gap:14px;padding:12px 16px;border-bottom:1px solid rgba(255,255,255,.1)}
+  .invhead b{font-size:18px;letter-spacing:.1em}
+  .invhead span{flex:1;color:var(--dim);font-size:12px}
+  .invcols{display:grid;grid-template-columns:1fr 1fr 1fr;gap:0;overflow:hidden;min-height:0}
+  .invcol{padding:12px 14px;overflow-y:auto;max-height:72vh;border-right:1px solid rgba(255,255,255,.08)}
+  .invcol:last-child{border-right:0}
+  .invcol h3{margin:4px 0 8px;font-size:12px;letter-spacing:.2em;color:var(--accent)}
+  .igroup{font-size:11px;color:var(--dim);margin:10px 0 4px;letter-spacing:.1em}
+  .irow{display:flex;align-items:center;gap:8px;padding:7px 8px;margin-bottom:4px;background:rgba(255,255,255,.05);border-radius:5px;cursor:pointer;font-size:14px}
+  .irow:hover{background:rgba(255,179,71,.16)}
+  .irow i{width:10px;height:22px;border-radius:2px;flex:none}
+  .irow span{flex:1}
+  .irow small,.wsub{color:var(--dim);font-size:12px}
+  .irow button,.wcard button,#invclose{font-size:11px;padding:4px 8px;letter-spacing:0;background:rgba(255,255,255,.12);color:var(--fg);border-radius:4px}
+  .irow button:hover,.wcard button:hover{background:var(--bad);color:#fff}
+  button.wide{width:100%;margin-top:8px;font-size:13px;padding:8px}
+  .iempty{color:var(--dim);font-size:13px;padding:6px 2px}
+  .wcard{padding:9px 10px;margin-bottom:6px;background:rgba(255,255,255,.05);border-radius:6px;cursor:pointer;border:1px solid transparent}
+  .wcard.on{border-color:var(--accent)}
+  .wslot{font-size:11px;color:var(--dim);letter-spacing:.1em}
+  .wname{font-size:16px;font-weight:700;margin:2px 0}
+  .wcard button{margin-top:6px}
   button.alt{background:rgba(255,255,255,.12);color:var(--fg)}
   #lobby{margin-top:16px;padding:14px 16px;background:rgba(0,0,0,.3);border:1px solid rgba(255,255,255,.12);border-radius:8px;max-width:400px}
   #lobbyinfo{font-size:13px;color:var(--dim);line-height:1.6}
@@ -127,13 +152,22 @@
   <div class="bl">
     <div id="arbar" class="bar"><i style="width:0"></i></div>
     <div id="hpbar" class="bar"><i style="width:100%"></i><b id="hptxt">100</b></div>
-    <div id="inv"><span>구급상자 <b id="meds">0</b> <small>[Q]</small></span><span>방탄복 <b id="armor">0</b></span></div>
+    <div id="invbar"><span>붕대 <b id="band">0</b></span><span>구급상자 <b id="meds">0</b> <small>[Q]</small></span><span>조끼 <b id="armor">-</b></span><span>헬멧 <b id="helm">-</b></span><span><small>[Tab] 인벤토리</small></span></div>
   </div>
   <div class="br">
     <div class="slot" id="slot0"><span id="wname0">—</span><span class="ammo" id="wammo0"></span></div>
     <div class="slot" id="slot1"><span id="wname1">—</span><span class="ammo" id="wammo1"></span></div>
+    <div class="slot" id="slot2"><span id="wname2">—</span><span class="ammo" id="wammo2"></span></div>
   </div>
   <canvas id="bigmap" class="hidden" width="800" height="800"></canvas>
+  <div id="invwin" class="hidden">
+    <div class="invhead"><b>인벤토리</b><span>클릭: 줍기 / 사용 · 버리기 버튼 · [Tab] 또는 [E] 닫기</span><button id="invclose">닫기</button></div>
+    <div class="invcols">
+      <div class="invcol"><h3>주변</h3><div id="invnear"></div><button id="takeall" class="wide">무기 빼고 모두 줍기</button></div>
+      <div class="invcol"><h3>가방</h3><div id="invbag"></div></div>
+      <div class="invcol"><h3>장비</h3><div id="invgear"></div><h3>무기</h3><div id="invweap"></div></div>
+    </div>
+  </div>
 </div>
 
 <div id="loading" class="screen">
@@ -154,10 +188,11 @@
         <b>마우스</b><span>조준 · 좌클릭 사격 · 우클릭 정밀 조준</span>
         <b>C</b><span>슬라이딩 (달리는 중) · 슬라이딩 중 점프로 가속 유지</span>
         <b>낙하 중</b><span>W 급강하 · Space 낙하산 조기 전개</span>
-        <b>E</b><span>보급 상자 열기</span>
+        <b>E / Tab</b><span>상자 열기 / 인벤토리 (줍기·버리기·사용)</span>
+        <b>F</b><span>바로 줍기 · <b style="display:inline">G</b> 들고 있는 총 버리기</span>
         <b>R</b><span>재장전</span>
-        <b>1 / 2</b><span>무기 교체 (휠도 가능)</span>
-        <b>Q</b><span>구급상자 사용</span>
+        <b>1 / 2 / 3</b><span>주무기 1 · 주무기 2 · 권총 (휠도 가능)</span>
+        <b>Q</b><span>회복 (붕대 / 구급상자 자동 선택)</span>
         <b>M</b><span>전체 지도</span>
         <b>Esc</b><span>일시정지</span>
       </div>

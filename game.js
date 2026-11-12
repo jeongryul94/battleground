@@ -1,7 +1,7 @@
 // GREYHAVEN · 최후의 생존 — third-person survival on the exported Blender island.
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { Rig } from './rig.js';
+import { Rig, makeGun } from './rig.js';
 import { mulberry32, zonePlan, zoneAt } from './zone.mjs';
 
 // ───────────────────────────────────────────── utils
@@ -368,13 +368,13 @@ function landPoint(cx, cz, rx, rz, minH = 1.5, tries = 40) {
 
 // ───────────────────────────────────────────── weapons
 const WEAPONS = {
-  pistol: { id: 'pistol', name: '권총', dmg: 21, rate: 0.26, mag: 12, reload: 1.3, spread: 0.012, pellets: 1, auto: false, range: 160, zoom: 1.35, kick: 0.012, snd: { freq: 2600, len: 0.18, vol: 0.45 }, tier: 0 },
-  smg: { id: 'smg', name: '기관단총', dmg: 13, rate: 0.075, mag: 32, reload: 1.7, spread: 0.028, pellets: 1, auto: true, range: 120, zoom: 1.3, kick: 0.006, snd: { freq: 2300, len: 0.14, vol: 0.4 }, tier: 1 },
-  shotgun: { id: 'shotgun', name: '샷건', dmg: 12, rate: 0.85, mag: 6, reload: 2.6, spread: 0.075, pellets: 9, auto: false, range: 45, zoom: 1.2, kick: 0.04, snd: { freq: 1200, len: 0.4, vol: 0.7 }, tier: 1 },
-  rifle: { id: 'rifle', name: '돌격소총', dmg: 18, rate: 0.105, mag: 30, reload: 2.1, spread: 0.016, pellets: 1, auto: true, range: 280, zoom: 1.7, kick: 0.009, snd: { freq: 1800, len: 0.25, vol: 0.55 }, tier: 2 },
-  dmr: { id: 'dmr', name: '저격소총', dmg: 62, rate: 0.8, mag: 6, reload: 2.5, spread: 0.002, pellets: 1, auto: false, range: 600, zoom: 4, kick: 0.035, snd: { freq: 1400, len: 0.5, vol: 0.75 }, tier: 2, scope: true },
+  pistol: { id: 'pistol', ammo: 'a9', name: '권총', dmg: 21, rate: 0.26, mag: 12, reload: 1.3, spread: 0.012, pellets: 1, auto: false, range: 160, zoom: 1.35, kick: 0.012, snd: { freq: 2600, len: 0.18, vol: 0.45 }, tier: 0 },
+  smg: { id: 'smg', ammo: 'a9', name: '기관단총', dmg: 13, rate: 0.075, mag: 32, reload: 1.7, spread: 0.028, pellets: 1, auto: true, range: 120, zoom: 1.3, kick: 0.006, snd: { freq: 2300, len: 0.14, vol: 0.4 }, tier: 1 },
+  shotgun: { id: 'shotgun', ammo: 'a12', name: '샷건', dmg: 12, rate: 0.85, mag: 6, reload: 2.6, spread: 0.075, pellets: 9, auto: false, range: 45, zoom: 1.2, kick: 0.04, snd: { freq: 1200, len: 0.4, vol: 0.7 }, tier: 1 },
+  rifle: { id: 'rifle', ammo: 'a556', name: '돌격소총', dmg: 18, rate: 0.105, mag: 30, reload: 2.1, spread: 0.016, pellets: 1, auto: true, range: 280, zoom: 1.7, kick: 0.009, snd: { freq: 1800, len: 0.25, vol: 0.55 }, tier: 2 },
+  dmr: { id: 'dmr', ammo: 'a556', name: '저격소총', dmg: 62, rate: 0.8, mag: 6, reload: 2.5, spread: 0.002, pellets: 1, auto: false, range: 600, zoom: 4, kick: 0.035, snd: { freq: 1400, len: 0.5, vol: 0.75 }, tier: 2, scope: true },
 };
-const newWeapon = id => ({ def: WEAPONS[id], mag: WEAPONS[id].mag, reserve: WEAPONS[id].mag * 2 });
+const newWeapon = (id, mag) => ({ def: WEAPONS[id], mag: mag ?? WEAPONS[id].mag });
 
 // ───────────────────────────────────────────── audio
 let AC = null, noiseBuf = null;
@@ -430,7 +430,7 @@ const botOutfit = () => ({ ...pick(OUTFITS), skin: pick(SKINS) });
 class Actor {
   constructor(name, colors) {
     this.name = name; this.pos = new THREE.Vector3(); this.vel = new THREE.Vector3();
-    this.vy = 0; this.yaw = 0; this.pitch = 0; this.hp = 100; this.armor = 0; this.dead = false; this.kills = 0;
+    this.vy = 0; this.yaw = 0; this.pitch = 0; this.hp = 100; this.gear = { vest: null, helm: null }; this.dead = false; this.kills = 0;
     this.onGround = false; this.speedNow = 0; this.fireT = 0; this.mode = 'ground'; this.slide = false; this.sprinting = false;
     this.reloadP = -1; this.healing = false; this.id = null;
     this.rig = new Rig(scene, colors);
@@ -558,7 +558,7 @@ function damage(t, amount, by, wname, head, at) {
     t.rig.hit(Math.random() < 0.5 ? -1 : 1);
     return;
   }
-  if (t.armor > 0 && by) { const a = Math.min(t.armor, amount * 0.5); t.armor -= a; amount -= a; }
+  if (by) amount = armorAbsorb(t.gear, amount, head);
   t.hp -= amount;
   t.rig.hit(Math.random() < 0.5 ? -1 : 1);
   if (t === player) {
@@ -584,6 +584,7 @@ function kill(t, by, wname) {
     if (t instanceof Bot && NET.isHost && !t.reported) {
       t.reported = true; deathVisual(t, by);
       NET.send({ t: 'botDied', id: t.id, name: t.name, by: by?.id || null, bn: by?.name || null, w: wname, pos: [t.pos.x, groundAt(t.pos.x, t.pos.z, t.pos.y + 0.5), t.pos.z] });
+      placeBox('death', groundPos(t.pos, 0.2), botLoot(t));
     }
     return;
   }
@@ -591,74 +592,253 @@ function kill(t, by, wname) {
   if (by && by !== t) by.kills++;
   feed(deathText(by?.name, wname, t.name), by === player || t === player);
   if (t === player) { endGame(false); return; }
-  spawnCrate(t.pos.clone().setY(groundAt(t.pos.x, t.pos.z, t.pos.y + 0.5)), 'drop');
+  placeBox('death', groundPos(t.pos, 0.2), botLoot(t));
   if (by === player) killBanner(t.name);
   if (aliveCount() === 1 && !player.dead) endGame(true);
 }
 function killBanner(name) { banner(`${name} 처치`); beep(700, 0.12, 0.1, 'sine'); setTimeout(() => beep(1050, 0.16, 0.1, 'sine'), 90); }
 const aliveCount = () => (NET.on ? NET.alive : actors.filter(a => !a.dead).length);
 
-// ───────────────────────────────────────────── crates
-const crates = [], crateById = new Map();
+// ───────────────────────────────────────────── items, armour, containers
+const ITEMS = {
+  a9: { name: '9mm 탄', type: 'ammo', color: '#e0b84a' },
+  a556: { name: '5.56mm 탄', type: 'ammo', color: '#8cc65a' },
+  a12: { name: '12게이지 탄', type: 'ammo', color: '#e0684a' },
+  band: { name: '붕대', type: 'heal', amt: 15, cap: 75, time: 2.5, color: '#efe6d0' },
+  med: { name: '구급상자', type: 'heal', amt: 100, cap: 100, time: 6, color: '#e05050' },
+};
+const GEAR_COLORS = ['', '#8a9474', '#5c7aa0', '#2f3a48'];
+for (let l = 1; l <= 3; l++) {
+  ITEMS['vest' + l] = { name: `방탄조끼 Lv.${l}`, type: 'vest', lvl: l, color: GEAR_COLORS[l] };
+  ITEMS['helm' + l] = { name: `헬멧 Lv.${l}`, type: 'helm', lvl: l, color: GEAR_COLORS[l] };
+}
+const ARMOR_PCT = [0, 0.3, 0.4, 0.55];
+const itemName = it => (it.k === 'w' ? WEAPONS[it.w].name : ITEMS[it.k].name);
+const itemColor = it => (it.k === 'w' ? '#cfd6dc' : ITEMS[it.k].color);
+const itemLabel = it => itemName(it) + (it.n ? ` ×${it.n}` : '') + (it.k === 'w' ? ` <small>${it.m}/${WEAPONS[it.w].mag}</small>` : '') + (it.d != null ? ` <small>${Math.round(it.d)}%</small>` : '');
+// armour soaks a share of the damage and wears down; returns the damage that gets through
+function armorAbsorb(gear, dmg, head) {
+  const key = head ? 'helm' : 'vest', pc = gear && gear[key];
+  if (!pc) return dmg;
+  const ab = dmg * ARMOR_PCT[pc.lvl];
+  pc.d -= ab * (1.6 - 0.3 * pc.lvl);
+  if (pc.d <= 0) gear[key] = null;
+  return dmg - ab;
+}
+
+const containers = new Map();
+let ctrSeq = 0;
 const boxGeo = new THREE.BoxGeometry(1, 1, 1);
-const crateMat = new THREE.MeshStandardMaterial({ color: 0x7d5a33, roughness: 0.85 });
+const crateMat = new THREE.MeshStandardMaterial({ color: 0x8a6236, roughness: 0.8 });
 const crateEdge = new THREE.MeshStandardMaterial({ color: 0x3a3632, roughness: 0.5, metalness: 0.5 });
-const dropMat = new THREE.MeshStandardMaterial({ color: 0x3b4a3a, roughness: 0.8 });
+const deathMat = new THREE.MeshStandardMaterial({ color: 0x2e3230, roughness: 0.7 });
 const bandMat = new THREE.MeshBasicMaterial({ color: 0x7ff0ff });
+const deathBand = new THREE.MeshBasicMaterial({ color: 0xffa040 });
 const beamGeo = new THREE.CylinderGeometry(0.06, 0.18, 6, 8, 1, true);
 const beamMat = new THREE.MeshBasicMaterial({ color: 0x9ff5ff, transparent: true, opacity: 0.28, depthWrite: false, blending: THREE.AdditiveBlending });
-let crateSeq = 0;
-function spawnCrate(p, kind = 'loot', id) {
-  const g = new THREE.Group(); g.position.copy(p); g.rotation.y = (p.x * 7.13 + p.z * 3.7) % Math.PI;
-  const add = (mat, sx, sy, sz, x, y, z) => { const m = new THREE.Mesh(boxGeo, mat); m.scale.set(sx, sy, sz); m.position.set(x, y, z); m.castShadow = m.receiveShadow = true; g.add(m); return m; };
-  add(kind === 'drop' ? dropMat : crateMat, 1.0, 0.6, 0.64, 0, 0.3, 0);
-  for (const x of [-0.47, 0.47]) add(crateEdge, 0.08, 0.64, 0.68, x, 0.3, 0);
-  add(crateEdge, 1.04, 0.07, 0.68, 0, 0.6, 0);
-  add(bandMat, 0.7, 0.03, 0.69, 0, 0.45, 0);
-  if (kind === 'loot') { const beam = new THREE.Mesh(beamGeo, beamMat); beam.position.y = 3.6; g.add(beam); }
-  scene.add(g);
-  const c = { id: id ?? 'c' + crateSeq++, g, pos: p.clone(), kind, open: false };
-  crates.push(c); crateById.set(c.id, c); return c;
+const ringGeo = new THREE.RingGeometry(0.35, 0.5, 24); ringGeo.rotateX(-Math.PI / 2);
+const ringMat = new THREE.MeshBasicMaterial({ color: 0xfff0a0, transparent: true, opacity: 0.55, depthWrite: false, blending: THREE.AdditiveBlending });
+function itemMesh(it) {
+  const g = new THREE.Group();
+  if (it.k === 'w') {
+    const gun = makeGun(it.w); gun.scale.setScalar(1.6); gun.rotation.set(0, 0, Math.PI / 2); gun.position.y = 0.08; g.add(gun);
+  } else {
+    const d = ITEMS[it.k], mat = new THREE.MeshStandardMaterial({ color: d.color, roughness: 0.6 });
+    const m = new THREE.Mesh(boxGeo, mat);
+    if (d.type === 'ammo') m.scale.set(0.3, 0.18, 0.2); else if (d.type === 'heal') m.scale.set(0.34, 0.14, 0.26); else m.scale.set(0.45, 0.32, 0.18);
+    m.position.y = m.scale.y / 2; m.castShadow = true; g.add(m);
+  }
+  const ring = new THREE.Mesh(ringGeo, ringMat); ring.position.y = 0.03; g.add(ring);
+  return g;
 }
-// all clients place the same crates from the match seed
+function spawnContainer(kind, pos, items, id) {
+  const g = new THREE.Group(); g.position.copy(pos); g.rotation.y = (pos.x * 7.13 + pos.z * 3.7) % Math.PI;
+  const add = (mat, sx, sy, sz, x, y, z) => { const m = new THREE.Mesh(boxGeo, mat); m.scale.set(sx, sy, sz); m.position.set(x, y, z); m.castShadow = m.receiveShadow = true; g.add(m); return m; };
+  if (kind === 'crate') {
+    add(crateMat, 1.0, 0.6, 0.64, 0, 0.3, 0);
+    for (const x of [-0.47, 0.47]) add(crateEdge, 0.08, 0.64, 0.68, x, 0.3, 0);
+    add(crateEdge, 1.04, 0.07, 0.68, 0, 0.6, 0); add(bandMat, 0.7, 0.03, 0.69, 0, 0.45, 0);
+    const beam = new THREE.Mesh(beamGeo, beamMat); beam.position.y = 3.6; g.add(beam);
+  } else if (kind === 'death') {
+    add(deathMat, 0.9, 0.5, 0.6, 0, 0.25, 0); add(deathBand, 0.92, 0.06, 0.62, 0, 0.38, 0);
+  } else g.add(itemMesh(items[0]));
+  scene.add(g);
+  const c = { id: id ?? 'l' + ctrSeq++, kind, pos: pos.clone(), items, taken: new Set(), g };
+  containers.set(c.id, c); return c;
+}
+function removeContainer(c) {
+  if (!containers.has(c.id)) return;
+  containers.delete(c.id); scene.remove(c.g);
+  if (c.kind !== 'ground') puff(c.pos.clone().setY(c.pos.y + 0.5), c.kind === 'crate' ? 0x9ff5ff : 0xffa040, 8, 2.5);
+}
+// crate contents are a pure function of (match seed, crate index) so every client sees the same loot
+function crateItems(rng) {
+  const P = a => a[Math.floor(rng() * a.length)], items = [];
+  if (rng() < 0.55) { const w = P(['smg', 'shotgun', 'rifle', 'rifle', 'dmr', 'smg', 'pistol']); items.push({ k: 'w', w, m: WEAPONS[w].mag }); items.push({ k: WEAPONS[w].ammo, n: WEAPONS[w].mag * 2 }); }
+  if (rng() < 0.5) items.push({ k: P(['a9', 'a556', 'a12']), n: P([15, 20, 30, 40]) });
+  if (rng() < 0.55) items.push(rng() < 0.7 ? { k: 'band', n: 2 + Math.floor(rng() * 3) } : { k: 'med', n: 1 });
+  if (rng() < 0.35) items.push({ k: (rng() < 0.5 ? 'vest' : 'helm') + (1 + Math.floor(rng() * rng() * 3)), d: 100 });
+  if (!items.length) items.push({ k: 'band', n: 3 });
+  return items;
+}
 function placeCrates(seed) {
-  for (const c of crates) scene.remove(c.g);
-  crates.length = 0; crateById.clear(); crateSeq = 0;
+  for (const c of [...containers.values()]) removeContainer(c);
+  ctrSeq = 0;
   RNG = mulberry32(seed);
-  for (const r of REGIONS) for (let i = 0; i < r.loot; i++) { const p = landPoint(r.x, r.z, r.rx, r.rz); if (p) spawnCrate(p); }
-  for (let i = 0; i < 40; i++) { const p = landPoint(0, 0, 720, 720, 4); if (p) spawnCrate(p); }
+  const spots = [];
+  for (const r of REGIONS) for (let i = 0; i < r.loot; i++) { const p = landPoint(r.x, r.z, r.rx, r.rz); if (p) spots.push(p); }
+  for (let i = 0; i < 40; i++) { const p = landPoint(0, 0, 720, 720, 4); if (p) spots.push(p); }
+  spots.forEach((p, i) => spawnContainer('crate', p, crateItems(mulberry32(seed ^ Math.imul(i + 1, 2654435761))), 'c' + i));
   RNG = Math.random;
 }
-function removeCrate(c) {
-  if (!c || c.open) return; c.open = true; scene.remove(c.g); puff(c.pos.clone().setY(c.pos.y + 0.6), 0x9ff5ff, 8, 2.5);
+function botLoot(b) {
+  const items = [{ k: 'w', w: b.weapon.def.id, m: b.weapon.mag }, { k: b.weapon.def.ammo, n: 20 + Math.floor(Math.random() * 40) }, { k: 'band', n: 1 + Math.floor(Math.random() * 3) }];
+  if (Math.random() < 0.3) items.push({ k: 'med', n: 1 });
+  for (const key of ['vest', 'helm']) if (b.gear[key]) items.push({ k: key + b.gear[key].lvl, d: b.gear[key].d });
+  return items;
 }
-function requestCrate(c) {
-  if (NET.on) { if (!c.requested) { c.requested = true; NET.send({ t: 'open', id: c.id }); } return; }
-  removeCrate(c); rollLoot(c.kind);
+function playerLoot() {
+  const p = player, inv = p.inv, items = [];
+  for (const w of inv.slots) if (w) items.push({ k: 'w', w: w.def.id, m: w.mag });
+  for (const [k, n] of Object.entries(inv.ammo)) if (n > 0) items.push({ k, n });
+  for (const k of ['band', 'med']) if (inv[k] > 0) items.push({ k, n: inv[k] });
+  for (const key of ['vest', 'helm']) if (p.gear[key]) items.push({ k: key + p.gear[key].lvl, d: p.gear[key].d });
+  return items;
 }
-function rollLoot(kind) {
-  const got = [];
-  const giveWeapon = () => {
-    const pool = ['smg', 'shotgun', 'rifle', 'rifle', 'dmr', 'smg', 'shotgun'];
-    const id = pick(pool); const w = newWeapon(id);
-    const slot = player.weapons[0] === null ? 0 : player.weapons[1] === null ? 1 : player.cur;
-    const old = player.weapons[slot];
-    if (old && old.def.id === id) { old.reserve += w.mag * 2; got.push(`${w.def.name} 탄약`); return; }
-    player.weapons[slot] = w; player.cur = slot; player.reloadT = 0; got.push(w.def.name);
-  };
-  const giveAmmo = () => { for (const w of player.weapons) if (w) w.reserve += w.def.mag * 2; got.push('탄약'); };
-  const giveMed = () => { player.meds += 1; got.push('구급상자'); };
-  const giveArmor = () => { if (NET.on) NET.send({ t: 'armor', amt: 50 }); else player.armor = Math.min(100, player.armor + 50); got.push('방탄복'); };
-  if (kind === 'drop') { giveAmmo(); giveMed(); if (Math.random() < 0.35) giveWeapon(); }
-  else {
-    const hasTwo = player.weapons[0] && player.weapons[1];
-    const r = Math.random();
-    if (r < (hasTwo ? 0.22 : 0.45)) giveWeapon(); else if (r < 0.65) giveAmmo(); else if (r < 0.85) giveMed(); else giveArmor();
-    if (Math.random() < 0.4) (Math.random() < 0.5 ? giveAmmo : giveMed)();
+const groundPos = (around, spread = 0.9) => {
+  const p = around.clone(); p.x += rand(-spread, spread); p.z += rand(-spread, spread);
+  p.y = groundAt(p.x, p.z, around.y + 0.5); return p;
+};
+// shared by single player and multiplayer: drop a box of items into the world
+function placeBox(kind, pos, items) {
+  if (!items.length) return;
+  if (NET.on) NET.send({ t: kind === 'death' ? 'deathbox' : 'drop', items, pos: [+pos.x.toFixed(2), +pos.y.toFixed(2), +pos.z.toFixed(2)] });
+  else spawnContainer(kind, pos, items);
+}
+
+// ───────────────────────────────────────────── player inventory
+const newInv = () => ({ slots: [null, null, null], ammo: { a9: 0, a556: 0, a12: 0 }, band: 0, med: 0 });
+const slotsFor = id => (id === 'pistol' ? [2] : [0, 1]);
+const SLOT_NAMES = ['주무기 1', '주무기 2', '권총'];
+function sendGear() { if (NET.on) NET.send({ t: 'gear', vest: player.gear.vest, helm: player.gear.helm }); }
+function dropItem(it) { placeBox('ground', groundPos(player.pos), [it]); }
+function addItem(it) {
+  const p = player, inv = p.inv;
+  if (it.k === 'w') {
+    const cand = slotsFor(it.w);
+    let s = cand.find(i => !inv.slots[i]);
+    if (s == null) { s = cand.includes(p.cur) ? p.cur : cand[0]; const old = inv.slots[s]; dropItem({ k: 'w', w: old.def.id, m: old.mag }); toast(`${old.def.name}을(를) 내려놓았습니다`); }
+    inv.slots[s] = newWeapon(it.w, it.m);
+    if (!inv.slots[p.cur] || (p.cur === 2 && s !== 2)) { p.cur = s; p.reloadT = 0; }
+    return;
   }
-  toast('+ ' + got.join(' · '));
-  beep(880, 0.06, 0.08, 'sine'); setTimeout(() => beep(1320, 0.08, 0.08, 'sine'), 70);
+  const d = ITEMS[it.k];
+  if (d.type === 'ammo') inv.ammo[it.k] += it.n;
+  else if (d.type === 'heal') inv[it.k] += it.n;
+  else {
+    const old = p.gear[d.type];
+    if (old) dropItem({ k: d.type + old.lvl, d: old.d });
+    p.gear[d.type] = { lvl: d.lvl, d: it.d ?? 100 }; sendGear();
+  }
 }
+function takeItem(c, i) {
+  if (!c || c.taken.has(i) || player.dead) return;
+  if (NET.on) { const key = c.id + ':' + i; if (!c.req) c.req = new Set(); if (c.req.has(key)) return; c.req.add(key); NET.send({ t: 'take', c: c.id, i }); return; }
+  markTaken(c, i, true);
+}
+function markTaken(c, i, mine) {
+  if (!c || c.taken.has(i)) return;
+  c.taken.add(i);
+  if (mine) { const it = c.items[i]; addItem(it); toast('+ ' + itemName(it) + (it.n ? ` ×${it.n}` : '')); beep(880, 0.05, 0.07, 'sine'); }
+  if (c.taken.size >= c.items.length) removeContainer(c);
+  if (invOpen) renderInv();
+}
+const nearbyContainers = (r = 2.8) => [...containers.values()].filter(c => c.pos.distanceTo(player.pos) < r).sort((a, b) => a.pos.distanceTo(player.pos) - b.pos.distanceTo(player.pos));
+function takeAllNearby() {
+  for (const c of nearbyContainers()) c.items.forEach((it, i) => { if (!c.taken.has(i) && it.k !== 'w') takeItem(c, i); });
+}
+function dropWeapon(s) {
+  const p = player, w = p.inv.slots[s]; if (!w) return;
+  p.inv.slots[s] = null; dropItem({ k: 'w', w: w.def.id, m: w.mag }); toast(`${w.def.name} 버림`);
+  if (p.cur === s) { p.reloadT = 0; const n = [0, 1, 2].find(i => p.inv.slots[i]); if (n != null) p.cur = n; }
+  if (invOpen) renderInv();
+}
+function dropStack(k, all) {
+  const inv = player.inv, d = ITEMS[k];
+  if (d.type === 'ammo') { const n = all ? inv.ammo[k] : Math.min(inv.ammo[k], 30); if (n <= 0) return; inv.ammo[k] -= n; dropItem({ k, n }); }
+  else if (d.type === 'heal') { const n = all ? inv[k] : 1; if (n <= 0) return; inv[k] -= n; dropItem({ k, n }); }
+  else { const pc = player.gear[d.type]; if (!pc) return; player.gear[d.type] = null; dropItem({ k: d.type + pc.lvl, d: pc.d }); sendGear(); }
+  if (invOpen) renderInv();
+}
+function useHeal(k) {
+  const p = player, d = ITEMS[k];
+  if (!d || p.inv[k] <= 0 || p.healT > 0 || p.dropping || p.dead) return false;
+  if (p.hp >= d.cap) { toast(`${d.name}는 체력 ${d.cap}까지만 회복됩니다`); return false; }
+  p.healItem = k; p.healT = p.healTotal = d.time; p.reloadT = 0; return true;
+}
+function quickHeal() {
+  const p = player;
+  if (p.hp < 75 && p.inv.band > 0 && (p.hp > 45 || p.inv.med === 0)) return useHeal('band');
+  if (p.inv.med > 0 && p.hp < 100) return useHeal('med');
+  if (p.inv.band > 0 && p.hp < 75) return useHeal('band');
+  toast(p.hp >= 100 ? '체력이 가득 찼습니다' : '회복 아이템이 없습니다');
+}
+
+// ───────────────────────────────────────────── inventory window
+let invOpen = false;
+function openInv() {
+  if (invOpen || state !== 'play' || player.dead || player.dropping) return;
+  invOpen = true; $('invwin').classList.remove('hidden'); firing = false; aiming = false;
+  document.exitPointerLock(); renderInv();
+}
+function closeInv(relock = true) {
+  if (!invOpen) return;
+  invOpen = false; $('invwin').classList.add('hidden');
+  if (relock) canvas.requestPointerLock();
+}
+const row = (label, color, act, btns = '') => `<div class="irow" ${act}><i style="background:${color}"></i><span>${label}</span>${btns}</div>`;
+function renderInv() {
+  if (!invOpen) return;
+  const p = player, inv = p.inv;
+  // nearby
+  let h = '';
+  for (const c of nearbyContainers()) {
+    const title = c.kind === 'crate' ? '보급 상자' : c.kind === 'death' ? '사망 상자' : '바닥';
+    const rows = c.items.map((it, i) => c.taken.has(i) ? '' : row(itemLabel(it), itemColor(it), `data-take="${c.id}|${i}"`)).join('');
+    if (rows) h += `<div class="igroup">${title}</div>` + rows;
+  }
+  $('invnear').innerHTML = h || '<div class="iempty">근처에 주울 물건이 없습니다</div>';
+  // backpack
+  let b = '';
+  for (const k of ['a9', 'a556', 'a12']) if (inv.ammo[k] > 0) b += row(`${ITEMS[k].name} ×${inv.ammo[k]}`, ITEMS[k].color, '', `<button data-drop="${k}|30">30 버리기</button><button data-drop="${k}|all">모두</button>`);
+  for (const k of ['band', 'med']) if (inv[k] > 0) b += row(`${ITEMS[k].name} ×${inv[k]} <small>클릭해서 사용</small>`, ITEMS[k].color, `data-use="${k}"`, `<button data-drop="${k}|1">버리기</button>`);
+  $('invbag').innerHTML = b || '<div class="iempty">가방이 비어 있습니다</div>';
+  // gear + weapons
+  let g = '';
+  for (const key of ['helm', 'vest']) {
+    const pc = p.gear[key];
+    g += pc ? row(`${ITEMS[key + pc.lvl].name} <small>내구도 ${Math.round(pc.d)}%</small>`, GEAR_COLORS[pc.lvl], '', `<button data-drop="${key}${pc.lvl}|1">버리기</button>`)
+      : `<div class="iempty">${key === 'helm' ? '헬멧' : '방탄조끼'} 없음</div>`;
+  }
+  $('invgear').innerHTML = g;
+  $('invweap').innerHTML = inv.slots.map((w, s) => `<div class="wcard ${s === p.cur ? 'on' : ''}" data-equip="${s}">
+      <div class="wslot">${s + 1} · ${SLOT_NAMES[s]}</div>
+      ${w ? `<div class="wname">${w.def.name}</div><div class="wsub">${w.mag}/${w.def.mag} · ${ITEMS[w.def.ammo].name} ${inv.ammo[w.def.ammo]}</div><button data-dropw="${s}">버리기 [G]</button>` : '<div class="wsub">비어 있음</div>'}
+    </div>`).join('');
+}
+$('invwin').addEventListener('click', e => {
+  const t = e.target.closest('[data-take],[data-use],[data-drop],[data-dropw],[data-equip],#takeall,#invclose');
+  if (!t) return;
+  if (t.id === 'takeall') takeAllNearby();
+  else if (t.id === 'invclose') closeInv();
+  else if (t.dataset.dropw != null) dropWeapon(+t.dataset.dropw);
+  else if (t.dataset.drop) { const [k, n] = t.dataset.drop.split('|'); dropStack(k, n === 'all'); }
+  else if (t.dataset.take) { const [cid, i] = t.dataset.take.split('|'); takeItem(containers.get(cid), +i); }
+  else if (t.dataset.use) { if (useHeal(t.dataset.use)) closeInv(); }
+  else if (t.dataset.equip != null) switchTo(+t.dataset.equip);
+  renderInv();
+});
+setInterval(() => { if (invOpen) renderInv(); }, 400);
 
 // ───────────────────────────────────────────── zone (pure function of match time, same on every client and the server)
 let zplan = null;
@@ -696,7 +876,7 @@ class Bot extends Actor {
     this.id = id; actorById.set(id, this);
     this.weapon = newWeapon(weaponId || pick(['pistol', 'pistol', 'smg', 'shotgun', 'rifle', 'rifle', 'dmr']));
     this.rig.setWeapon(this.weapon.def.id);
-    this.armor = pick([0, 0, 25, 50]);
+    this.gear = { vest: Math.random() < 0.45 ? { lvl: pick([1, 1, 2, 2, 3]), d: 100 } : null, helm: Math.random() < 0.4 ? { lvl: pick([1, 1, 2, 3]), d: 100 } : null };
     this.target = null; this.seenAt = -99; this.lastSeen = new THREE.Vector3();
     this.think = rand(0, 0.4); this.react = 0; this.strafe = 1; this.strafeT = 0;
     this.wander = null; this.zoneGoal = null; this.stuckT = 0; this.stuckFrom = new THREE.Vector3(); this.reloadT = 0;
@@ -864,8 +1044,8 @@ function createPlayer(spawn, id = 'p0', name = '나') {
   player = new Actor(name, outfit);
   player.id = id; player.chuteColor = new THREE.Color(outfit.helmet).getHex();
   player.pos.set(spawn.x, 300, spawn.z);
-  player.pitch = -0.35; player.weapons = [newWeapon('pistol'), null]; player.cur = 0; player.meds = 0; player.reloadT = 0;
-  player.healT = 0; player.dropping = true; player.mode = 'free'; player.weapons[0].reserve = 36;
+  player.pitch = -0.35; player.inv = newInv(); player.inv.slots[2] = newWeapon('pistol'); player.inv.ammo.a9 = 36; player.cur = 2; player.reloadT = 0;
+  player.gear = { vest: null, helm: null }; player.healT = 0; player.healTotal = 1; player.dropping = true; player.mode = 'free';
   player.slideT = 0; player.slideCD = 0; player.wantSlide = false; player.dropVy = -10;
   player.rig.setWeapon('pistol');
   addCanopy(player);
@@ -915,13 +1095,14 @@ class RemoteActor extends Actor {
     this.animate(dt);
   }
 }
-const curW = () => player.weapons[player.cur];
+const curW = () => player.inv.slots[player.cur];
+const ammoOf = w => player.inv.ammo[w.def.ammo];
 function healCancel() { if (player && player.healT > 0) { player.healT = 0; toast('치료 취소'); } }
 function tryReload() {
-  const w = curW(); if (!w || player.reloadT > 0 || w.mag >= w.def.mag || w.reserve <= 0) return;
+  const w = curW(); if (!w || player.reloadT > 0 || w.mag >= w.def.mag || ammoOf(w) <= 0) return;
   player.reloadT = w.def.reload; healCancel(); beep(300, 0.05, 0.05);
 }
-function switchTo(i) { if (player.weapons[i] && player.cur !== i) { player.cur = i; player.reloadT = 0; player.fireT = 0.25; beep(500, 0.04, 0.04); } }
+function switchTo(i) { if (player.inv.slots[i] && player.cur !== i) { player.cur = i; player.reloadT = 0; player.fireT = 0.25; beep(500, 0.04, 0.04); } }
 
 const camFwd = new THREE.Vector3(), camRight = new THREE.Vector3();
 function updatePlayer(dt) {
@@ -962,8 +1143,15 @@ function updatePlayer(dt) {
   p.fireT -= dt; p.slideCD -= dt;
   const w = curW();
   if (w && p.rig.weaponId !== w.def.id) p.rig.setWeapon(w.def.id);
-  if (p.reloadT > 0) { p.reloadT -= dt; if (p.reloadT <= 0 && w) { const n = Math.min(w.def.mag - w.mag, w.reserve); w.mag += n; w.reserve -= n; beep(420, 0.05, 0.05); } }
-  if (p.healT > 0) { p.healT -= dt; if (p.healT <= 0) { p.meds--; if (NET.on) NET.send({ t: 'heal', amt: 45 }); else p.hp = Math.min(100, p.hp + 45); toast('+45 체력'); beep(660, 0.12, 0.08, 'sine'); } }
+  if (p.reloadT > 0) { p.reloadT -= dt; if (p.reloadT <= 0 && w) { const n = Math.min(w.def.mag - w.mag, ammoOf(w)); w.mag += n; p.inv.ammo[w.def.ammo] -= n; beep(420, 0.05, 0.05); } }
+  if (p.healT > 0) {
+    p.healT -= dt;
+    if (p.healT <= 0) {
+      const d = ITEMS[p.healItem]; p.inv[p.healItem]--;
+      if (NET.on) NET.send({ t: 'heal', amt: d.amt, cap: d.cap }); else p.hp = Math.max(p.hp, Math.min(d.cap, p.hp + d.amt));
+      toast(d.name + ' 사용 완료'); beep(660, 0.12, 0.08, 'sine');
+    }
+  }
   const hsp = Math.hypot(p.vel.x, p.vel.z);
   const fwdInput = iz * fz + ix * fx;
   p.sprinting = !!keys.ShiftLeft && !aiming && !firing && p.healT <= 0 && fwdInput > 0.3 && !p.slide && !p.swimming;
@@ -1017,7 +1205,7 @@ function updatePlayer(dt) {
   // ── shooting
   if (firing && w && p.fireT <= 0 && p.reloadT <= 0 && p.healT <= 0 && !p.sprinting) {
     if (w.mag <= 0) {
-      if (w.reserve <= 0) { toast('탄약이 없습니다'); beep(180, 0.05, 0.05); firing = false; p.fireT = 0.3; }
+      if (ammoOf(w) <= 0) { toast(ITEMS[w.def.ammo].name + '이 없습니다'); beep(180, 0.05, 0.05); firing = false; p.fireT = 0.3; }
       else { tryReload(); if (!w.def.auto) firing = false; }
     } else {
       const def = w.def;
@@ -1042,9 +1230,7 @@ function updatePlayer(dt) {
   p.reloadP = p.reloadT > 0 && w ? 1 - p.reloadT / w.def.reload : -1;
   p.healing = p.healT > 0;
   p.animate(dt);
-  let nearC = null, nd = 2.6;
-  for (const c of crates) if (!c.open) { const d = c.pos.distanceTo(p.pos); if (d < nd) { nd = d; nearC = c; } }
-  p.nearCrate = nearC;
+  p.nearBox = nearbyContainers(2.6)[0] || null;
 }
 
 // ───────────────────────────────────────────── camera
@@ -1145,10 +1331,15 @@ function updateHUD(dt) {
   const cr = $('cross'); cr.style.transform = `translate(-50%,-50%) scale(${1 + hud.bloom * 0.6 + (p.speedNow > 1 ? 0.3 : 0) + (p.onGround ? 0 : 0.5)})`; cr.style.opacity = p.dropping || p.sprinting ? 0 : 1;
   $('zonetint').style.opacity = zone.cur && !p.dead && outsideZone(p.pos) ? 1 : 0;
   $('action').classList.toggle('hidden', !(p.healT > 0 || p.reloadT > 0));
-  if (p.healT > 0) { $('actiontxt').textContent = '치료 중'; $('actionbar').style.width = (1 - p.healT / 3) * 100 + '%'; }
+  if (p.healT > 0) { $('actiontxt').textContent = ITEMS[p.healItem].name + ' 사용 중'; $('actionbar').style.width = (1 - p.healT / p.healTotal) * 100 + '%'; }
   else if (p.reloadT > 0 && w) { $('actiontxt').textContent = '재장전'; $('actionbar').style.width = (1 - p.reloadT / w.def.reload) * 100 + '%'; }
   const pr = $('prompt');
-  if (p.nearCrate && !p.dropping) { pr.classList.remove('hidden'); pr.innerHTML = `<b>[E]</b> ${p.nearCrate.kind === 'drop' ? '전리품 줍기' : '보급 상자 열기'}`; }
+  if (p.nearBox && !p.dropping && !invOpen && !p.dead) {
+    const c = p.nearBox, left = c.items.length - c.taken.size;
+    const first = c.items.find((_, i) => !c.taken.has(i)) || c.items[0];
+    pr.classList.remove('hidden');
+    pr.innerHTML = c.kind === 'ground' ? `<b>[F]</b> 줍기: ${itemLabel(first)} · <b>[E]</b> 인벤토리` : `<b>[E]</b> ${c.kind === 'crate' ? '보급 상자' : '사망 상자'} 열기 (${left}개) · <b>[F]</b> 바로 줍기`;
+  }
   else if (p.mode === 'free') { pr.classList.remove('hidden'); pr.innerHTML = `<b>[W]</b> 급강하 · <b>[Space]</b> 낙하산 펼치기 · 고도 ${Math.round(p.pos.y - groundAt(p.pos.x, p.pos.z, p.pos.y))}m`; }
   else pr.classList.add('hidden');
   if (hud.slow > 0) return;
@@ -1156,14 +1347,15 @@ function updateHUD(dt) {
   $('alive').textContent = aliveCount(); $('kills').textContent = p.kills;
   $('hpbar').firstElementChild.style.width = clamp(p.hp, 0, 100) + '%'; $('hpbar').classList.toggle('low', p.hp < 35);
   $('hptxt').textContent = Math.max(0, Math.ceil(p.hp));
-  $('arbar').firstElementChild.style.width = p.armor + '%';
-  $('meds').textContent = p.meds; $('armor').textContent = Math.round(p.armor);
+  $('arbar').firstElementChild.style.width = (p.gear.vest ? p.gear.vest.d : 0) + '%';
+  $('band').textContent = p.inv.band; $('meds').textContent = p.inv.med;
+  $('armor').textContent = p.gear.vest ? 'Lv.' + p.gear.vest.lvl : '-'; $('helm').textContent = p.gear.helm ? 'Lv.' + p.gear.helm.lvl : '-';
   $('spd').textContent = Math.round(Math.hypot(p.vel.x, p.vel.z) * 3.6);
-  for (let i = 0; i < 2; i++) {
-    const ww = p.weapons[i];
+  for (let i = 0; i < 3; i++) {
+    const ww = p.inv.slots[i];
     $('slot' + i).classList.toggle('on', i === p.cur);
-    $('wname' + i).textContent = ww ? `${i + 1}  ${ww.def.name}` : `${i + 1}  비어 있음`;
-    $('wammo' + i).innerHTML = ww ? `${ww.mag}<small> / ${ww.reserve}</small>` : '';
+    $('wname' + i).textContent = ww ? `${i + 1}  ${ww.def.name}` : `${i + 1}  ${SLOT_NAMES[i]} 없음`;
+    $('wammo' + i).innerHTML = ww ? `${ww.mag}<small> / ${ammoOf(ww)}</small>` : '';
   }
   const zm = $('zonemsg');
   if (zone.stage === 'final') { zm.textContent = '최종 자기장'; zm.className = 'warn'; }
@@ -1307,7 +1499,13 @@ function onNet(m) {
     }
     case 'hp': {
       if (!player) return;
-      const prev = player.hp; player.hp = m.hp; player.armor = m.armor;
+      const prev = player.hp; player.hp = m.hp;
+      // server-side armour wear: keep the local gear in sync (null = broken)
+      if (m.gear) for (const key of ['vest', 'helm']) {
+        const pc = player.gear[key], sv = m.gear[key];
+        if (!sv) { if (pc) toast(ITEMS[key + pc.lvl].name + '이(가) 파괴되었습니다'); player.gear[key] = null; }
+        else if (pc && pc.lvl === sv.lvl) pc.d = sv.d;
+      }
       if (m.hp < prev - 0.01) {
         hud.hurt = m.zone ? Math.max(hud.hurt, 0.3) : 0.6; shake(m.zone ? 0.08 : 0.28);
         const a = m.by && actorById.get(m.by);
@@ -1329,16 +1527,11 @@ function onNet(m) {
       if (v) deathVisual(v, by);
       if (m.by === NET.id && m.victim !== NET.id) { player.kills++; killBanner(m.victimName); }
       feed(deathText(m.byName, m.w, m.victimName), m.by === NET.id || m.victim === NET.id);
-      if (m.pos) { const p = new THREE.Vector3(m.pos[0], 0, m.pos[2]); p.y = groundAt(p.x, p.z, (m.pos[1] ?? terrainH(p.x, p.z)) + 0.5); spawnCrate(p, 'drop', m.drop); }
-      if (m.victim === NET.id) onLocalDeath(m.rank);
+      if (m.victim === NET.id) { placeBox('death', groundPos(player.pos, 0.2), playerLoot()); onLocalDeath(m.rank); }
       break;
     }
-    case 'crate': {
-      const c = crateById.get(m.id); if (!c) return;
-      removeCrate(c);
-      if (m.by === NET.id) rollLoot(c.kind);
-      break;
-    }
+    case 'took': markTaken(containers.get(m.c), m.i, m.by === NET.id); break;
+    case 'box': if (NET.on) spawnContainer(m.kind, new THREE.Vector3(...m.pos), m.items, m.id); break;
     case 'end': {
       if (!NET.on) return;
       const win = m.winner === NET.id;
@@ -1367,7 +1560,7 @@ $('resume').addEventListener('click', () => canvas.requestPointerLock());
 $('pause').addEventListener('click', e => { if (e.target.tagName !== 'INPUT') canvas.requestPointerLock(); });
 document.addEventListener('pointerlockchange', () => {
   const locked = document.pointerLockElement === canvas;
-  $('pause').classList.toggle('hidden', locked || state !== 'play' || (player && player.dead));
+  $('pause').classList.toggle('hidden', locked || invOpen || state !== 'play' || (player && player.dead));
   $('pausenote').textContent = NET.on ? '멀티 경기 중에는 게임이 멈추지 않습니다!' : '';
   if (!locked) { firing = false; aiming = false; for (const k in keys) keys[k] = false; }
 });
@@ -1381,20 +1574,28 @@ addEventListener('mousedown', e => {
 addEventListener('mouseup', e => { if (e.button === 0) firing = false; if (e.button === 2) aiming = false; });
 addEventListener('contextmenu', e => e.preventDefault());
 let wheelT = 0;
-addEventListener('wheel', () => {
+addEventListener('wheel', e => {
+  if (invOpen) return;
   if (state !== 'play' || !player || performance.now() - wheelT < 250) return;
-  wheelT = performance.now(); switchTo(player.cur === 0 ? 1 : 0);
+  wheelT = performance.now();
+  for (let k = 1; k <= 3; k++) { const n = (player.cur + (e.deltaY > 0 ? k : 3 - k)) % 3; if (player.inv.slots[n]) { switchTo(n); break; } }
 });
 addEventListener('keydown', e => {
   if (state !== 'play' || !player || player.dead) return;
+  if (invOpen && !['Tab', 'KeyE', 'Escape', 'KeyW', 'KeyA', 'KeyS', 'KeyD', 'ShiftLeft'].includes(e.code)) return;
   if (e.repeat && e.code !== 'KeyW') { if (['Space', 'KeyC'].includes(e.code)) e.preventDefault(); return; }
   keys[e.code] = true;
   if (e.code === 'KeyR') tryReload();
   if (e.code === 'Digit1') switchTo(0);
   if (e.code === 'Digit2') switchTo(1);
   if (e.code === 'KeyC') player.wantSlide = true;
-  if (e.code === 'KeyE' && player.nearCrate && !player.dropping) requestCrate(player.nearCrate);
-  if (e.code === 'KeyQ' && player.meds > 0 && player.healT <= 0 && player.hp < 100 && !player.dropping) { player.healT = 3; player.reloadT = 0; }
+  if (e.code === 'Digit3') switchTo(2);
+  if (e.code === 'Tab') { e.preventDefault(); invOpen ? closeInv() : openInv(); }
+  if (e.code === 'KeyE') { if (invOpen) closeInv(); else if (player.nearBox && !player.dropping) openInv(); }
+  if (e.code === 'KeyF' && player.nearBox && !player.dropping) { const c = player.nearBox, i = c.items.findIndex((_, j) => !c.taken.has(j)); if (i >= 0) takeItem(c, i); }
+  if (e.code === 'KeyG' && !player.dropping) dropWeapon(player.cur);
+  if (e.code === 'KeyQ' && !player.dropping) quickHeal();
+  if (e.code === 'Escape' && invOpen) closeInv(false);
   if (e.code === 'KeyM') $('bigmap').classList.toggle('hidden');
   if (e.code === 'Space') e.preventDefault();
 });
@@ -1419,7 +1620,7 @@ $('pname').value = store.get('gh_name') || '';
 const clock = new THREE.Clock();
 // ?test : run without pointer lock and expose internals for automated checks
 const TEST = new URLSearchParams(location.search).has('test');
-if (TEST) window.__g = { NET, actorById, get player() { return player; }, bots, zone, crates, actors, keys, terrainH, groundAt, setFiring: v => (firing = v), setAiming: v => (aiming = v), get state() { return state; }, startGame, camera };
+if (TEST) window.__g = { NET, actorById, get player() { return player; }, bots, zone, containers, actors, addItem, openInv, closeInv, dropWeapon, takeItem, nearbyContainers, keys, terrainH, groundAt, setFiring: v => (firing = v), setAiming: v => (aiming = v), get state() { return state; }, startGame, camera };
 function loop() {
   requestAnimationFrame(loop);
   const dt = Math.min(clock.getDelta(), 0.05);
