@@ -131,7 +131,7 @@ export class Rig2 {
   setWeapon(id, rarity = 0) {
     if (this.weaponId === id && this.weaponRarity === rarity) return;
     if (this.gun) this.holder.remove(this.gun);
-    this.gun = makeGun(id, rarity); this.gun.scale.setScalar(1.25); this.holder.add(this.gun); this.weaponId = id; this.weaponRarity = rarity;
+    this.gun = makeGun(id, rarity); this.gun.scale.setScalar(1.25); this.holder.add(this.gun); this.weaponId = id; this.weaponRarity = rarity; this.drawK = this.gun && this.drawK !== undefined ? 1 : 0;
     this.gun.userData.muzzle.add(this.flash);
     const h = HOLD[id]; this.holdPos = new THREE.Vector3(h[0] * 1.1, h[1], h[2] * 1.1 - 0.05);
   }
@@ -165,6 +165,7 @@ export class Rig2 {
     this.reloadK = lerp(this.reloadK, s.reload >= 0 ? 1 : 0, k);
     this.healK = lerp(this.healK, s.heal ? 1 : 0, k);
     this.kick *= Math.exp(-16 * dt); this.dip *= Math.exp(-7 * dt); this.flinch *= Math.exp(-9 * dt);
+    this.drawK = Math.max(0, (this.drawK || 0) - dt * 4); // weapon swap: gun rises into place over ~0.25 s
 
     // ── pick the full-body animation layer
     const T = {}; for (const n of LOCO) T[n] = 0;
@@ -215,9 +216,10 @@ export class Rig2 {
     b.s3.getWorldPosition(_C);
     this.aim.position.copy(this.root.worldToLocal(_C.add(_A.set(0, 0.12, 0))));
     this.aim.rotation.order = 'YXZ';
-    this.aim.rotation.set(pitch - 0.85 * this.sprintK - 0.5 * this.healK - 0.3 * this.reloadK + this.kick * 0.12, -this.legYaw + 0.6 * this.sprintK + 0.25 * this.healK, 0.45 * this.reloadK + 0.3 * this.sprintK);
+    const dk = this.drawK * this.drawK * (3 - 2 * this.drawK);
+    this.aim.rotation.set(pitch - 0.9 * dk - 0.85 * this.sprintK - 0.5 * this.healK - 0.3 * this.reloadK + this.kick * 0.12, -this.legYaw + 0.6 * this.sprintK + 0.25 * this.healK, 0.45 * this.reloadK + 0.3 * this.sprintK);
     const h = this.holdPos;
-    this.holder.position.set(h.x - 0.05 * this.sprintK, h.y + Math.sin(this.phase * 2) * 0.01 - 0.03 * this.reloadK, h.z + this.kick * 0.08 + 0.08 * this.sprintK);
+    this.holder.position.set(h.x - 0.05 * this.sprintK, h.y + Math.sin(this.phase * 2) * 0.01 - 0.03 * this.reloadK - 0.22 * dk, h.z + this.kick * 0.08 + 0.08 * this.sprintK);
     this.root.updateMatrixWorld(true);
     const u = this.gun.userData;
     const fwd = _f.set(-Math.sin(yaw), 0, -Math.cos(yaw));

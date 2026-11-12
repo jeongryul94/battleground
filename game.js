@@ -955,13 +955,18 @@ function quickHeal() {
 let invOpen = false;
 function openInv() {
   if (invOpen || state !== 'play' || player.dead || player.dropping) return;
-  invOpen = true; $('invwin').classList.remove('hidden'); firing = false; aiming = false;
+  invOpen = true; $('invwin').classList.remove('hidden'); firing = false; aiming = false; mouseDX = mouseDY = 0;
   document.exitPointerLock(); renderInv();
 }
 function closeInv(relock = true) {
   if (!invOpen) return;
   invOpen = false; $('invwin').classList.add('hidden');
-  if (relock) canvas.requestPointerLock();
+  mouseDX = mouseDY = 0;
+  if (relock) {
+    const r = canvas.requestPointerLock();
+    // Chrome refuses a re-lock right after leaving one: fall back to the click-to-resume card
+    if (r && r.catch) r.catch(() => { if (state === 'play' && !player.dead) $('pause').classList.remove('hidden'); });
+  } else if (state === 'play' && !player.dead) $('pause').classList.remove('hidden');
 }
 const row = (label, color, act, btns = '') => `<div class="irow" ${act}><i style="background:${color}"></i><span>${label}</span>${btns}</div>`;
 function renderInv() {
@@ -1801,14 +1806,23 @@ function netTick(dt) {
 canvas.addEventListener('click', () => { if (state === 'play' && document.pointerLockElement !== canvas) canvas.requestPointerLock(); });
 $('resume').addEventListener('click', () => canvas.requestPointerLock());
 $('pause').addEventListener('click', e => { if (e.target.tagName !== 'INPUT') canvas.requestPointerLock(); });
+let lockChangeT = 0;
 document.addEventListener('pointerlockchange', () => {
   const locked = document.pointerLockElement === canvas;
+  lockChangeT = performance.now();
   $('pause').classList.toggle('hidden', locked || invOpen || state !== 'play' || (player && player.dead));
   $('pausenote').textContent = NET.on ? '멀티 경기 중에는 게임이 멈추지 않습니다!' : '';
-  if (!locked) { firing = false; aiming = false; for (const k in keys) keys[k] = false; }
+  if (!locked) { firing = false; aiming = false; if (!invOpen) for (const k in keys) keys[k] = false; }
 });
+// keys released while the window lost focus never send keyup: clear them so nobody runs on by themselves
+addEventListener('blur', () => { for (const k in keys) keys[k] = false; firing = false; aiming = false; });
 for (const id of ['sens', 'sens2']) $(id).addEventListener('input', e => { sens = +e.target.value; $('sens').value = $('sens2').value = sens; });
-addEventListener('mousemove', e => { if (document.pointerLockElement === canvas) { mouseDX += e.movementX; mouseDY += e.movementY; } });
+addEventListener('mousemove', e => {
+  if (document.pointerLockElement !== canvas) return;
+  if (performance.now() - lockChangeT < 120) return;
+  if (Math.abs(e.movementX) > 250 || Math.abs(e.movementY) > 250) return;
+  mouseDX += e.movementX; mouseDY += e.movementY;
+});
 addEventListener('mousedown', e => {
   if (document.pointerLockElement !== canvas || state !== 'play') return;
   if (e.button === 0) { firing = true; if (player.healT > 0) healCancel(); }
@@ -1885,7 +1899,7 @@ function loop() {
   requestAnimationFrame(loop);
   const _t0 = performance.now();
   const dt = Math.min(clock.getDelta(), 0.05);
-  const running = (state === 'play' && (NET.on || TEST || document.pointerLockElement === canvas)) || state === 'ending';
+  const running = (state === 'play' && (NET.on || TEST || invOpen || document.pointerLockElement === canvas)) || state === 'ending';
   if (state === 'play' || state === 'ending') {
     if (running) {
       now = NET.on ? (performance.now() - matchStart) / 1000 : now + dt;
