@@ -1,0 +1,13 @@
+{
+  "name": "greyhaven-survival",
+  "version": "1.0.0",
+  "private": true,
+  "description": "GREYHAVEN - browser third-person survival game with multiplayer (no dependencies)",
+  "main": "serve.js",
+  "scripts": {
+    "start": "node serve.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

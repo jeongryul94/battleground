@@ -1,0 +1,4 @@
+tools/
+*.bat
+game_v1_backup.js
+.git

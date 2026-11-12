@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GREYHAVEN 생존</title>
+<style>
+  :root{--fg:#eef3f1;--dim:#9fb0ad;--accent:#ffb347;--zone:#4fb4ff;--bad:#ff5a4f;--ok:#7be38b;--panel:rgba(12,18,20,.62)}
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;overflow:hidden;background:#0d1416;color:var(--fg);font-family:"Segoe UI","Malgun Gothic",system-ui,sans-serif;user-select:none}
+  canvas#view{display:block;width:100vw;height:100vh}
+  .hidden{display:none!important}
+  /* screens */
+  .screen{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:radial-gradient(ellipse at center,rgba(10,22,26,.75),rgba(5,9,10,.95));z-index:20}
+  .card{display:flex;gap:32px;align-items:center;flex-wrap:wrap;justify-content:center;padding:24px;max-width:1100px}
+  h1{font-size:56px;letter-spacing:.18em;margin:0;font-weight:800}
+  h1 small{display:block;font-size:18px;letter-spacing:.5em;color:var(--accent);font-weight:600;margin-top:6px}
+  .info p{color:var(--dim);line-height:1.6;max-width:380px}
+  .keys{display:grid;grid-template-columns:auto 1fr;gap:4px 14px;font-size:14px;color:var(--dim);margin:16px 0}
+  .keys b{color:var(--fg);font-family:Consolas,monospace;background:rgba(255,255,255,.08);padding:1px 7px;border-radius:4px;text-align:center}
+  button{font:inherit;font-weight:700;font-size:18px;padding:12px 34px;border:0;border-radius:6px;background:var(--accent);color:#1a1205;cursor:pointer;letter-spacing:.1em}
+  button:hover{filter:brightness(1.1)}
+  #pickmap{border:1px solid rgba(255,255,255,.15);border-radius:6px;cursor:crosshair;width:440px;height:440px;max-width:90vw;max-height:90vw}
+  .maphint{font-size:13px;color:var(--dim);text-align:center;margin-top:8px}
+  #loadbar{width:320px;height:6px;background:rgba(255,255,255,.1);border-radius:3px;overflow:hidden;margin-top:14px}
+  #loadbar i{display:block;height:100%;width:0;background:var(--accent);transition:width .2s}
+  label.sens{display:flex;gap:10px;align-items:center;color:var(--dim);font-size:14px;margin:12px 0}
+  /* HUD */
+  #hud{position:fixed;inset:0;pointer-events:none;z-index:10}
+  #cross{position:absolute;left:50%;top:50%;width:22px;height:22px;transform:translate(-50%,-50%)}
+  #cross:before,#cross:after{content:"";position:absolute;background:rgba(255,255,255,.85);box-shadow:0 0 2px #000}
+  #cross:before{left:10px;top:0;width:2px;height:22px}
+  #cross:after{top:10px;left:0;height:2px;width:22px}
+  #cross.gap:before{clip-path:polygon(0 0,100% 0,100% 35%,0 35%,0 65%,100% 65%,100% 100%,0 100%)}
+  #cross.gap:after{clip-path:polygon(0 0,35% 0,35% 100%,0 100%,0 0,65% 0,100% 0,100% 100%,65% 100%)}
+  #hit{position:absolute;left:50%;top:50%;width:30px;height:30px;transform:translate(-50%,-50%) rotate(45deg);opacity:0}
+  #hit:before,#hit:after{content:"";position:absolute;background:#fff}
+  #hit:before{left:14px;top:0;width:2px;height:30px}
+  #hit:after{top:14px;left:0;height:2px;width:30px}
+  #hit.head:before,#hit.head:after{background:var(--bad)}
+  .tl{position:absolute;left:18px;top:16px;display:flex;gap:10px}
+  .pill{background:var(--panel);padding:7px 14px;border-radius:6px;font-weight:700;font-size:15px}
+  .pill span{color:var(--dim);font-weight:500;margin-right:6px;font-size:13px}
+  #zonebox{position:absolute;left:50%;top:16px;transform:translateX(-50%);text-align:center}
+  #zonemsg{background:var(--panel);padding:7px 18px;border-radius:6px;font-size:15px;font-weight:600}
+  #zonemsg.warn{color:var(--zone)}
+  #mini{position:absolute;right:16px;top:16px;width:190px;height:190px;border-radius:8px;border:1px solid rgba(255,255,255,.18);background:#0b1517}
+  #feed{position:absolute;right:16px;top:220px;width:300px;display:flex;flex-direction:column;gap:4px;align-items:flex-end}
+  #feed div{background:var(--panel);padding:4px 10px;border-radius:4px;font-size:13px;transition:opacity .6s}
+  #feed .me{color:var(--accent)}
+  .bl{position:absolute;left:18px;bottom:18px;width:320px}
+  .bar{height:14px;background:rgba(0,0,0,.45);border-radius:3px;overflow:hidden;margin-top:6px;position:relative}
+  .bar i{display:block;height:100%;transition:width .15s}
+  #hpbar i{background:linear-gradient(90deg,#e9eef0,#fff)}
+  #hpbar.low i{background:var(--bad)}
+  #arbar{height:8px}
+  #arbar i{background:#58a6ff}
+  .bar b{position:absolute;right:6px;top:-1px;font-size:11px;color:#000;mix-blend-mode:screen}
+  #inv{display:flex;gap:10px;margin-top:10px;font-size:13px;color:var(--dim)}
+  #inv b{color:var(--fg)}
+  .br{position:absolute;right:18px;bottom:18px;display:flex;flex-direction:column;align-items:flex-end;gap:8px}
+  .slot{background:var(--panel);padding:8px 14px;border-radius:6px;min-width:200px;display:flex;justify-content:space-between;gap:20px;opacity:.55;font-size:14px}
+  .slot.on{opacity:1;outline:1px solid var(--accent)}
+  .slot .ammo{font-family:Consolas,monospace;font-weight:700;font-size:20px}
+  .slot .ammo small{font-size:13px;color:var(--dim)}
+  #prompt{position:absolute;left:50%;top:62%;transform:translateX(-50%);background:var(--panel);padding:8px 16px;border-radius:6px;font-size:15px}
+  #prompt b{color:var(--accent)}
+  #toast{position:absolute;left:50%;top:70%;transform:translateX(-50%);font-size:15px;font-weight:600;color:var(--ok);text-shadow:0 1px 3px #000;transition:opacity .4s}
+  #banner{position:absolute;left:50%;top:30%;transform:translateX(-50%);font-size:26px;font-weight:800;letter-spacing:.12em;color:var(--accent);text-shadow:0 2px 8px #000;transition:opacity .5s;opacity:0}
+  #action{position:absolute;left:50%;top:56%;transform:translateX(-50%);width:200px;text-align:center;font-size:13px}
+  #action .bar{height:6px}
+  #action .bar i{background:var(--ok)}
+  #vignette{position:absolute;inset:0;box-shadow:inset 0 0 160px rgba(255,30,20,.0);transition:box-shadow .25s}
+  #zonetint{position:absolute;inset:0;background:rgba(40,120,255,.14);opacity:0;transition:opacity .4s}
+  #dmgdir{position:absolute;left:50%;top:50%;width:0;height:0}
+  #dmgdir i{position:absolute;left:-60px;top:-150px;width:120px;height:40px;border-radius:60px 60px 0 0;border-top:6px solid rgba(255,60,40,.85);opacity:0;transition:opacity .6s;transform-origin:60px 150px}
+  #scope{position:absolute;inset:0;background:radial-gradient(circle at center,transparent 0 33vh,rgba(0,0,0,.92) 33.4vh);opacity:0}
+  #bigmap{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:min(80vh,80vw);height:min(80vh,80vw);border-radius:8px;border:1px solid rgba(255,255,255,.2)}
+  #speed{position:absolute;inset:0;width:100%;height:100%}
+  #dmgnums{position:absolute;inset:0;overflow:hidden}
+  .dn{position:absolute;left:0;top:0;font-weight:800;font-size:20px;color:#fff;text-shadow:0 0 3px #000,0 2px 4px #000;font-family:Consolas,monospace;will-change:transform}
+  .dn.head{color:#ffcf4a;font-size:24px}
+  #spdbox{position:absolute;left:18px;bottom:96px;font-family:Consolas,monospace;font-size:13px;color:var(--dim)}
+  #spdbox b{font-size:22px;color:var(--fg)}
+  #endtitle{font-size:48px;margin:0 0 8px;letter-spacing:.1em}
+  #endstats{color:var(--dim);font-size:18px;margin-bottom:24px;line-height:1.7}
+  #endstats b{color:var(--fg)}
+  .center{text-align:center}
+  button.alt{background:rgba(255,255,255,.12);color:var(--fg)}
+  #lobby{margin-top:16px;padding:14px 16px;background:rgba(0,0,0,.3);border:1px solid rgba(255,255,255,.12);border-radius:8px;max-width:400px}
+  #lobbyinfo{font-size:13px;color:var(--dim);line-height:1.6}
+  #lobbyinfo code{color:var(--accent);font-family:Consolas,monospace}
+  #lobbylist{list-style:none;padding:0;margin:10px 0;display:flex;flex-direction:column;gap:4px}
+  #lobbylist li{background:rgba(255,255,255,.06);padding:6px 10px;border-radius:5px;font-weight:600}
+  #lobbylist small{color:var(--dim);font-weight:400}
+  #waitmsg{font-size:13px;color:var(--accent)}
+  #hostctl button{margin-top:4px}
+</style>
+<script type="importmap">
+{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"}}
+</script>
+</head>
+<body>
+<canvas id="view"></canvas>
+
+<div id="hud" class="hidden">
+  <canvas id="speed"></canvas>
+  <div id="zonetint"></div>
+  <div id="dmgnums"></div>
+  <div id="spdbox"><b id="spd">0</b> km/h</div>
+  <div id="vignette"></div>
+  <div id="scope"></div>
+  <div id="cross"></div>
+  <div id="hit"></div>
+  <div id="dmgdir"><i></i></div>
+  <div class="tl">
+    <div class="pill"><span>생존</span><b id="alive">20</b></div>
+    <div class="pill"><span>처치</span><b id="kills">0</b></div>
+  </div>
+  <div id="zonebox"><div id="zonemsg">—</div></div>
+  <canvas id="mini" width="380" height="380"></canvas>
+  <div id="feed"></div>
+  <div id="banner"></div>
+  <div id="prompt" class="hidden"></div>
+  <div id="toast"></div>
+  <div id="action" class="hidden"><div id="actiontxt">치료 중</div><div class="bar"><i id="actionbar"></i></div></div>
+  <div class="bl">
+    <div id="arbar" class="bar"><i style="width:0"></i></div>
+    <div id="hpbar" class="bar"><i style="width:100%"></i><b id="hptxt">100</b></div>
+    <div id="inv"><span>구급상자 <b id="meds">0</b> <small>[Q]</small></span><span>방탄복 <b id="armor">0</b></span></div>
+  </div>
+  <div class="br">
+    <div class="slot" id="slot0"><span id="wname0">—</span><span class="ammo" id="wammo0"></span></div>
+    <div class="slot" id="slot1"><span id="wname1">—</span><span class="ammo" id="wammo1"></span></div>
+  </div>
+  <canvas id="bigmap" class="hidden" width="800" height="800"></canvas>
+</div>
+
+<div id="loading" class="screen">
+  <div class="center">
+    <h1>GREYHAVEN<small>최후의 생존</small></h1>
+    <div id="loadbar" style="margin:22px auto 8px"><i></i></div>
+    <div id="loadtxt" style="color:var(--dim);font-size:14px">섬 데이터를 불러오는 중…</div>
+  </div>
+</div>
+
+<div id="start" class="screen hidden">
+  <div class="card">
+    <div class="info">
+      <h1>GREYHAVEN<small>최후의 생존</small></h1>
+      <p>버려진 섬에 생존자 20명이 투입됐습니다. 보급 상자에서 무기와 장비를 찾고, 좁혀오는 자기장 안에서 마지막 한 명이 되세요.</p>
+      <div class="keys">
+        <b>WASD</b><span>이동 · <b style="display:inline">Shift</b> 달리기 · <b style="display:inline">Space</b> 점프</span>
+        <b>마우스</b><span>조준 · 좌클릭 사격 · 우클릭 정밀 조준</span>
+        <b>C</b><span>슬라이딩 (달리는 중) · 슬라이딩 중 점프로 가속 유지</span>
+        <b>낙하 중</b><span>W 급강하 · Space 낙하산 조기 전개</span>
+        <b>E</b><span>보급 상자 열기</span>
+        <b>R</b><span>재장전</span>
+        <b>1 / 2</b><span>무기 교체 (휠도 가능)</span>
+        <b>Q</b><span>구급상자 사용</span>
+        <b>M</b><span>전체 지도</span>
+        <b>Esc</b><span>일시정지</span>
+      </div>
+      <label class="sens">마우스 감도 <input type="range" id="sens" min="0.5" max="3" step="0.1" value="1.2"></label>
+      <label class="sens">닉네임 <input id="pname" maxlength="12" placeholder="이름 입력" style="font:inherit;padding:6px 10px;border-radius:5px;border:1px solid rgba(255,255,255,.2);background:rgba(0,0,0,.35);color:var(--fg);width:180px"></label>
+      <div style="display:flex;gap:10px;flex-wrap:wrap">
+        <button id="join">멀티 로비 참가</button>
+        <button id="go" class="alt">혼자 하기</button>
+      </div>
+      <div id="lobby" class="hidden">
+        <div id="lobbyinfo"></div>
+        <ul id="lobbylist"></ul>
+        <div id="hostctl" class="hidden">
+          <label class="sens">봇 수 <input type="range" id="botn" min="0" max="30" value="19"> <b id="botnv">19</b></label>
+          <button id="mstart">경기 시작</button>
+        </div>
+        <div id="waitmsg"></div>
+      </div>
+    </div>
+    <div>
+      <canvas id="pickmap" width="512" height="512"></canvas>
+      <div class="maphint">지도를 클릭해 낙하 지점을 고르세요 (선택하지 않으면 무작위)</div>
+    </div>
+  </div>
+</div>
+
+<div id="pause" class="screen hidden">
+  <div class="center">
+    <h1 style="font-size:40px">일시정지</h1>
+    <p style="color:var(--dim)">화면을 클릭하면 계속합니다</p>
+    <p id="pausenote" style="color:var(--accent);font-weight:700"></p>
+    <label class="sens" style="justify-content:center">마우스 감도 <input type="range" id="sens2" min="0.5" max="3" step="0.1" value="1.2"></label>
+    <button id="resume">계속하기</button>
+  </div>
+</div>
+
+<div id="end" class="screen hidden">
+  <div class="center">
+    <h2 id="endtitle">—</h2>
+    <div id="endstats"></div>
+    <div style="display:flex;gap:10px;justify-content:center"><button id="spectate" class="alt hidden">계속 지켜보기</button><button id="again">다시 하기</button></div>
+  </div>
+</div>
+
+<script type="module" src="game.js"></script>
+</body>
+</html>

@@ -1,0 +1,1471 @@
+// GREYHAVEN · 최후의 생존 — third-person survival on the exported Blender island.
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { Rig } from './rig.js';
+import { mulberry32, zonePlan, zoneAt } from './zone.mjs';
+
+// ───────────────────────────────────────────── utils
+const $ = id => document.getElementById(id);
+let RNG = Math.random; // swapped for a seeded generator while placing shared match content
+const rand = (a, b) => a + RNG() * (b - a);
+const clamp = (v, a, b) => (v < a ? a : v > b ? b : v);
+const pick = a => a[Math.floor(RNG() * a.length)];
+const fmt = s => { s = Math.max(0, Math.ceil(s)); return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0'); };
+const SEA = -0.65;
+const BOUND = 840;
+
+// ───────────────────────────────────────────── world data (heightmap + colliders)
+const CELL = 16, GOFF = 900, GN = Math.ceil((2 * GOFF) / CELL);
+const W = { grid: Array.from({ length: GN * GN }, () => []) };
+let qStamp = 0, rStamp = 0;
+
+function initWorld(d) {
+  W.n = d.grid.n; W.min = d.grid.min; W.step = d.grid.size / (W.n - 1);
+  W.h = Float32Array.from(d.heights);
+  const all = [];
+  for (const b of d.boxes) all.push({ cyl: false, minX: b[0], minY: b[1], minZ: b[2], maxX: b[3], maxY: b[4], maxZ: b[5], q: 0, r2: 0 });
+  for (const c of d.cylinders) all.push({ cyl: true, x: c[0], z: c[1], r: c[2], minY: c[3], maxY: c[4], minX: c[0] - c[2], maxX: c[0] + c[2], minZ: c[1] - c[2], maxZ: c[1] + c[2], q: 0, r2: 0 });
+  W.colliders = all;
+  for (const c of all) {
+    const i0 = Math.floor((c.minX + GOFF) / CELL), i1 = Math.floor((c.maxX + GOFF) / CELL);
+    const j0 = Math.floor((c.minZ + GOFF) / CELL), j1 = Math.floor((c.maxZ + GOFF) / CELL);
+    for (let j = Math.max(0, j0); j <= Math.min(GN - 1, j1); j++)
+      for (let i = Math.max(0, i0); i <= Math.min(GN - 1, i1); i++) W.grid[j * GN + i].push(c);
+  }
+}
+
+function terrainH(x, z) {
+  const n = W.n, fi = (x - W.min) / W.step, fj = (-z - W.min) / W.step;
+  if (fi < 0 || fj < 0 || fi > n - 1 || fj > n - 1) return -6;
+  const i = Math.min(n - 2, Math.floor(fi)), j = Math.min(n - 2, Math.floor(fj));
+  const tx = fi - i, ty = fj - j, h = W.h;
+  const a = h[j * n + i], b = h[j * n + i + 1], c = h[(j + 1) * n + i], e = h[(j + 1) * n + i + 1];
+  return a * (1 - tx) * (1 - ty) + b * tx * (1 - ty) + c * (1 - tx) * ty + e * tx * ty;
+}
+
+function near(x, z, r, out) {
+  out.length = 0; const s = ++qStamp;
+  const i0 = Math.floor((x - r + GOFF) / CELL), i1 = Math.floor((x + r + GOFF) / CELL);
+  const j0 = Math.floor((z - r + GOFF) / CELL), j1 = Math.floor((z + r + GOFF) / CELL);
+  for (let j = Math.max(0, j0); j <= Math.min(GN - 1, j1); j++)
+    for (let i = Math.max(0, i0); i <= Math.min(GN - 1, i1); i++)
+      for (const c of W.grid[j * GN + i]) if (c.q !== s) { c.q = s; out.push(c); }
+  return out;
+}
+
+const STEP = 0.6, BODY_H = 1.8;
+const _A = [], _B = [];
+// highest walkable surface at (x,z) that is not above the feet + step height
+function groundAt(x, z, y) {
+  let g = terrainH(x, z);
+  for (const c of near(x, z, 0, _A)) {
+    if (c.cyl || c.maxY > y + STEP || c.maxY <= g) continue;
+    if (x >= c.minX && x <= c.maxX && z >= c.minZ && z <= c.maxZ) g = c.maxY;
+  }
+  return g;
+}
+// push a vertical capsule (feet p, radius r) out of colliders; returns true if blocked
+function resolve(p, r) {
+  let pushed = false;
+  const list = near(p.x, p.z, r + 0.2, _B);
+  for (let it = 0; it < 2; it++) {
+    for (const c of list) {
+      if (c.maxY <= p.y + STEP || c.minY >= p.y + BODY_H) continue;
+      if (c.cyl) {
+        let dx = p.x - c.x, dz = p.z - c.z; const rr = c.r + r, d2 = dx * dx + dz * dz;
+        if (d2 >= rr * rr) continue;
+        let d = Math.sqrt(d2); if (d < 1e-4) { dx = 1; dz = 0; d = 1; }
+        p.x = c.x + (dx / d) * rr; p.z = c.z + (dz / d) * rr; pushed = true;
+      } else {
+        const cx = clamp(p.x, c.minX, c.maxX), cz = clamp(p.z, c.minZ, c.maxZ);
+        const dx = p.x - cx, dz = p.z - cz, d2 = dx * dx + dz * dz;
+        if (d2 >= r * r) continue;
+        if (d2 > 1e-8) { const d = Math.sqrt(d2); p.x = cx + (dx / d) * r; p.z = cz + (dz / d) * r; }
+        else {
+          const l = p.x - c.minX, rt = c.maxX - p.x, f = p.z - c.minZ, bk = c.maxZ - p.z, m = Math.min(l, rt, f, bk);
+          if (m === l) p.x = c.minX - r; else if (m === rt) p.x = c.maxX + r; else if (m === f) p.z = c.minZ - r; else p.z = c.maxZ + r;
+        }
+        pushed = true;
+      }
+    }
+  }
+  p.x = clamp(p.x, -BOUND, BOUND); p.z = clamp(p.z, -BOUND, BOUND);
+  return pushed;
+}
+function blockedAt(x, z, y, r) {
+  for (const c of near(x, z, r + 0.2, _B)) {
+    if (c.maxY <= y + STEP || c.minY >= y + BODY_H) continue;
+    if (c.cyl) { if ((x - c.x) ** 2 + (z - c.z) ** 2 < (c.r + r) ** 2) return true; }
+    else if (x > c.minX - r && x < c.maxX + r && z > c.minZ - r && z < c.maxZ + r) return true;
+  }
+  return false;
+}
+
+// ───────────────────────────────────────────── raycasting
+function rayBox(o, d, c) {
+  let tmin = 0, tmax = 1e9;
+  const os = [o.x, o.y, o.z], ds = [d.x, d.y, d.z], mn = [c.minX, c.minY, c.minZ], mx = [c.maxX, c.maxY, c.maxZ];
+  for (let a = 0; a < 3; a++) {
+    if (Math.abs(ds[a]) < 1e-9) { if (os[a] < mn[a] || os[a] > mx[a]) return -1; continue; }
+    let t1 = (mn[a] - os[a]) / ds[a], t2 = (mx[a] - os[a]) / ds[a];
+    if (t1 > t2) { const t = t1; t1 = t2; t2 = t; }
+    if (t1 > tmin) tmin = t1; if (t2 < tmax) tmax = t2;
+    if (tmin > tmax) return -1;
+  }
+  return tmin;
+}
+function rayCyl(o, d, c) {
+  const ox = o.x - c.x, oz = o.z - c.z, a = d.x * d.x + d.z * d.z;
+  if (a < 1e-9) return -1;
+  const b = 2 * (ox * d.x + oz * d.z), cc = ox * ox + oz * oz - c.r * c.r;
+  if (cc < 0) return -1;
+  const disc = b * b - 4 * a * cc; if (disc < 0) return -1;
+  const t = (-b - Math.sqrt(disc)) / (2 * a); if (t < 0) return -1;
+  const y = o.y + d.y * t; return y < c.minY || y > c.maxY ? -1 : t;
+}
+function raySphere(o, d, cx, cy, cz, r) {
+  const ox = o.x - cx, oy = o.y - cy, oz = o.z - cz;
+  const b = ox * d.x + oy * d.y + oz * d.z, c = ox * ox + oy * oy + oz * oz - r * r, disc = b * b - c;
+  if (disc < 0) return -1; const t = -b - Math.sqrt(disc); return t >= 0 ? t : -1;
+}
+function rayTerrain(o, d, maxT) {
+  if (o.y < terrainH(o.x, o.z)) return 0;
+  const step = 1.5; let prev = 0;
+  for (let t = step; ; t += step) {
+    const tt = Math.min(t, maxT), y = o.y + d.y * tt;
+    if (y > 170 && d.y >= 0) return Infinity;
+    if (y < terrainH(o.x + d.x * tt, o.z + d.z * tt)) {
+      let lo = prev, hi = tt;
+      for (let k = 0; k < 7; k++) { const m = (lo + hi) / 2; if (o.y + d.y * m < terrainH(o.x + d.x * m, o.z + d.z * m)) hi = m; else lo = m; }
+      return hi;
+    }
+    prev = tt; if (tt >= maxT) return Infinity;
+  }
+}
+const actors = [];
+// returns { t, ent, head, world }
+function raycast(o, d, maxDist, ignore, entities = true) {
+  let best = maxDist, ent = null, head = false, world = false;
+  const s = ++rStamp; let last = -1;
+  for (let t = 0; t <= best + 3; t += 3) {
+    const x = o.x + d.x * t, z = o.z + d.z * t;
+    const i = Math.floor((x + GOFF) / CELL), j = Math.floor((z + GOFF) / CELL);
+    if (i < 0 || j < 0 || i >= GN || j >= GN) continue;
+    const ci = j * GN + i; if (ci === last) continue; last = ci;
+    for (const c of W.grid[ci]) {
+      if (c.r2 === s) continue; c.r2 = s;
+      const tt = c.cyl ? rayCyl(o, d, c) : rayBox(o, d, c);
+      if (tt >= 0 && tt < best) { best = tt; world = true; }
+    }
+  }
+  const tt = rayTerrain(o, d, best);
+  if (tt < best) { best = tt; world = true; }
+  if (entities) {
+    for (const a of actors) {
+      if (a === ignore || a.dead) continue;
+      const p = a.pos;
+      if ((p.x - o.x) ** 2 + (p.z - o.z) ** 2 > (best + 3) ** 2) continue;
+      let th = raySphere(o, d, p.x, p.y + 1.66, p.z, 0.24);
+      let tb = Math.min(...[0.5, 1.05].map(h => { const v = raySphere(o, d, p.x, p.y + h, p.z, 0.42); return v < 0 ? 1e9 : v; }));
+      if (th >= 0 && th < best && th <= tb) { best = th; ent = a; head = true; world = false; }
+      else if (tb < best) { best = tb; ent = a; head = false; world = false; }
+    }
+  }
+  return { t: best, ent, head, world };
+}
+function hasLOS(a, b) {
+  const o = new THREE.Vector3(a.pos.x, a.pos.y + 1.6, a.pos.z);
+  const tgt = new THREE.Vector3(b.pos.x, b.pos.y + 1.2, b.pos.z);
+  const d = tgt.clone().sub(o); const dist = d.length(); d.divideScalar(dist);
+  return raycast(o, d, dist, a, false).t >= dist - 0.3;
+}
+
+// ───────────────────────────────────────────── renderer / scene
+const canvas = $('view');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 1.5));
+renderer.setSize(innerWidth, innerHeight);
+renderer.shadowMap.enabled = true;
+renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.05;
+const scene = new THREE.Scene();
+const SKY = new THREE.Color(0xb9cdd6);
+scene.background = SKY;
+scene.fog = new THREE.Fog(SKY, 160, 1150);
+const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.1, 2500);
+camera.rotation.order = 'YXZ';
+scene.add(new THREE.HemisphereLight(0xd6e6ee, 0x46523a, 1.25));
+// gradient sky dome with sun glow (follows the camera)
+const sky = new THREE.Mesh(new THREE.SphereGeometry(2000, 32, 16), new THREE.ShaderMaterial({
+  side: THREE.BackSide, depthWrite: false, fog: false,
+  uniforms: { top: { value: new THREE.Color(0x3f78ad) }, horizon: { value: SKY.clone() }, sunDir: { value: new THREE.Vector3(0.45, 0.8, 0.35).normalize() } },
+  vertexShader: 'varying vec3 vDir; void main(){ vDir = normalize(position); gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }',
+  fragmentShader: `uniform vec3 top; uniform vec3 horizon; uniform vec3 sunDir; varying vec3 vDir;
+    void main(){ vec3 d = normalize(vDir); float h = max(d.y, 0.0);
+      vec3 c = mix(horizon, top, pow(h, 0.5));
+      float s = max(dot(d, sunDir), 0.0);
+      c += vec3(1.0, 0.86, 0.62) * (pow(s, 900.0) * 4.0 + pow(s, 12.0) * 0.22);
+      gl_FragColor = vec4(c, 1.0);
+      #include <tonemapping_fragment>
+      #include <colorspace_fragment>
+    }`,
+}));
+sky.renderOrder = -1; sky.frustumCulled = false; scene.add(sky);
+const sun = new THREE.DirectionalLight(0xfff0d8, 2.4);
+const SUN_DIR = new THREE.Vector3(0.45, 0.8, 0.35).normalize();
+sun.castShadow = true;
+sun.shadow.mapSize.set(2048, 2048);
+Object.assign(sun.shadow.camera, { left: -90, right: 90, top: 90, bottom: -90, near: 10, far: 700 });
+sun.shadow.bias = -0.0006; sun.shadow.normalBias = 0.6;
+scene.add(sun, sun.target);
+addEventListener('resize', () => { camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix(); renderer.setSize(innerWidth, innerHeight); });
+
+// water
+const water = new THREE.Mesh(new THREE.PlaneGeometry(8000, 8000), new THREE.MeshStandardMaterial({ color: 0x1e5866, roughness: 0.18, metalness: 0.15, transparent: true, opacity: 0.9 }));
+water.rotation.x = -Math.PI / 2; water.position.y = SEA; water.receiveShadow = true;
+scene.add(water);
+
+// ───────────────────────────────────────────── loading
+async function fetchBuf(url, prog) {
+  const r = await fetch(url); if (!r.ok) throw new Error(url + ' ' + r.status);
+  const reader = r.body.getReader(); const chunks = []; let got = 0;
+  for (;;) { const { done, value } = await reader.read(); if (done) break; chunks.push(value); got += value.length; prog(url, got); }
+  const out = new Uint8Array(got); let o = 0; for (const c of chunks) { out.set(c, o); o += c.length; }
+  return out.buffer;
+}
+const gltfLoader = new GLTFLoader();
+const parseGLB = buf => new Promise((res, rej) => gltfLoader.parse(buf, './assets/', res, rej));
+
+function hash2(x, z) { const s = Math.sin(x * 127.1 + z * 311.7) * 43758.5453; return s - Math.floor(s); }
+function vnoise(x, z) {
+  const i = Math.floor(x), j = Math.floor(z), fx = x - i, fz = z - j, u = fx * fx * (3 - 2 * fx), v = fz * fz * (3 - 2 * fz);
+  return (hash2(i, j) * (1 - u) + hash2(i + 1, j) * u) * (1 - v) + (hash2(i, j + 1) * (1 - u) + hash2(i + 1, j + 1) * u) * v;
+}
+
+function setupTerrain(gltf) {
+  gltf.scene.traverse(o => {
+    if (!o.isMesh) return;
+    const g = o.geometry; g.computeVertexNormals();
+    const pos = g.attributes.position, nor = g.attributes.normal, col = new Float32Array(pos.count * 3), c = new THREE.Color();
+    const sand = new THREE.Color().setRGB(0.66, 0.58, 0.40, THREE.SRGBColorSpace);
+    const grassA = new THREE.Color().setRGB(0.34, 0.44, 0.20, THREE.SRGBColorSpace);
+    const grassB = new THREE.Color().setRGB(0.24, 0.33, 0.15, THREE.SRGBColorSpace);
+    const dirt = new THREE.Color().setRGB(0.42, 0.38, 0.27, THREE.SRGBColorSpace);
+    const rock = new THREE.Color().setRGB(0.47, 0.48, 0.45, THREE.SRGBColorSpace);
+    for (let k = 0; k < pos.count; k++) {
+      const x = pos.getX(k), y = pos.getY(k), z = pos.getZ(k), ny = nor.getY(k);
+      const n = vnoise(x * 0.03, z * 0.03) * 0.6 + vnoise(x * 0.11, z * 0.11) * 0.4;
+      c.copy(grassA).lerp(grassB, n);
+      if (n > 0.72) c.lerp(dirt, (n - 0.72) * 2.2);
+      const rk = clamp((y - 62) / 18, 0, 1) + clamp((0.82 - ny) * 4, 0, 1);
+      c.lerp(rock, clamp(rk, 0, 1) * (0.75 + 0.25 * n));
+      c.lerp(sand, clamp((3.6 - y) / 2.2, 0, 1));
+      col.set([c.r, c.g, c.b], k * 3);
+    }
+    g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    o.material = new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.95 });
+    o.receiveShadow = true;
+  });
+  scene.add(gltf.scene);
+}
+function setupStatic(gltf) {
+  gltf.scene.traverse(o => {
+    if (!o.isMesh) return;
+    o.castShadow = true; o.receiveShadow = true;
+    for (const m of [].concat(o.material)) { m.roughness = Math.max(m.roughness ?? 0.8, 0.7); m.metalness = Math.min(m.metalness ?? 0, 0.2); }
+  });
+  scene.add(gltf.scene);
+}
+function setupProps(gltf, props) {
+  gltf.scene.updateMatrixWorld(true);
+  const inv = new THREE.Matrix4(), rel = new THREE.Matrix4(), m = new THREE.Matrix4();
+  for (const [pid, info] of Object.entries(props)) {
+    const node = gltf.scene.getObjectByName(pid);
+    if (!node) { console.warn('missing prototype', pid); continue; }
+    inv.copy(node.matrixWorld).invert();
+    const isBush = info.name.includes('scrub');
+    node.traverse(ch => {
+      if (!ch.isMesh) return;
+      rel.multiplyMatrices(inv, ch.matrixWorld);
+      const im = new THREE.InstancedMesh(ch.geometry, ch.material, info.matrices.length);
+      info.matrices.forEach((arr, k) => { m.fromArray(arr).multiply(rel); im.setMatrixAt(k, m); });
+      im.instanceMatrix.needsUpdate = true;
+      im.castShadow = !isBush; im.receiveShadow = true;
+      im.computeBoundingSphere();
+      scene.add(im);
+    });
+  }
+}
+
+// ───────────────────────────────────────────── maps (minimap / landing picker)
+const MAPPX = 512;
+const w2m = v => ((v + 850) / 1700) * MAPPX;
+const m2w = p => (p / MAPPX) * 1700 - 850;
+let baseMap;
+function buildBaseMap() {
+  baseMap = document.createElement('canvas'); baseMap.width = baseMap.height = MAPPX;
+  const ctx = baseMap.getContext('2d'), img = ctx.createImageData(MAPPX, MAPPX);
+  for (let py = 0; py < MAPPX; py++) for (let px = 0; px < MAPPX; px++) {
+    const x = m2w(px + 0.5), z = m2w(py + 0.5), h = terrainH(x, z);
+    const shade = clamp(1 + (terrainH(x - 3, z - 3) - h) * 0.08, 0.6, 1.35);
+    let r, g, b;
+    if (h < SEA) { const dpt = clamp(-h / 6, 0, 1); r = 28 - dpt * 10; g = 78 - dpt * 20; b = 92 - dpt * 10; }
+    else if (h < 3.3) { r = 176; g = 158; b = 112; }
+    else if (h > 72) { r = 130; g = 132; b = 124; }
+    else { r = 92; g = 116; b = 60; }
+    if (h >= SEA) { r *= shade; g *= shade; b *= shade; }
+    const k = (py * MAPPX + px) * 4; img.data[k] = r; img.data[k + 1] = g; img.data[k + 2] = b; img.data[k + 3] = 255;
+  }
+  ctx.putImageData(img, 0, 0);
+  ctx.fillStyle = 'rgba(34,58,28,.75)';
+  for (const c of W.colliders) if (c.cyl && c.r > 0.5) ctx.fillRect(w2m(c.x) - 0.6, w2m(c.z) - 0.6, 1.3, 1.3);
+  ctx.fillStyle = 'rgba(70,72,74,.95)';
+  for (const c of W.colliders) if (!c.cyl && (c.maxX - c.minX) * (c.maxZ - c.minZ) > 6) ctx.fillRect(w2m(c.minX), w2m(c.minZ), Math.max(1, w2m(c.maxX) - w2m(c.minX)), Math.max(1, w2m(c.maxZ) - w2m(c.minZ)));
+  ctx.font = 'bold 13px Malgun Gothic, sans-serif'; ctx.textAlign = 'center';
+  for (const r of REGIONS) if (r.label) { ctx.fillStyle = 'rgba(0,0,0,.55)'; ctx.fillText(r.label, w2m(r.x) + 1, w2m(r.z) + 1); ctx.fillStyle = '#f4efe2'; ctx.fillText(r.label, w2m(r.x), w2m(r.z)); }
+}
+function drawMap(cv, cx, cz, span, opts = {}) {
+  const ctx = cv.getContext('2d'), S = cv.width, sc = S / span;
+  const X = x => (x - (cx - span / 2)) * sc, Z = z => (z - (cz - span / 2)) * sc;
+  ctx.fillStyle = '#123138'; ctx.fillRect(0, 0, S, S);
+  const k = MAPPX / 1700;
+  ctx.drawImage(baseMap, (cx - span / 2 + 850) * k, (cz - span / 2 + 850) * k, span * k, span * k, 0, 0, S, S);
+  if (opts.zone && zone.cur) {
+    ctx.lineWidth = Math.max(2, S / 190);
+    ctx.strokeStyle = '#4fb4ff'; ctx.beginPath(); ctx.arc(X(zone.cur.x), Z(zone.cur.z), zone.cur.r * sc, 0, Math.PI * 2); ctx.stroke();
+    if (zone.next) { ctx.strokeStyle = '#ffffff'; ctx.setLineDash([6, 5]); ctx.beginPath(); ctx.arc(X(zone.next.x), Z(zone.next.z), zone.next.r * sc, 0, Math.PI * 2); ctx.stroke(); ctx.setLineDash([]); }
+  }
+  if (opts.player && player) {
+    const px = X(player.pos.x), pz = Z(player.pos.z);
+    ctx.save(); ctx.translate(px, pz); ctx.rotate(-player.yaw);
+    ctx.fillStyle = '#ffb347'; ctx.strokeStyle = '#000'; ctx.lineWidth = 1.5;
+    const s = Math.max(7, S / 40); ctx.beginPath(); ctx.moveTo(0, -s); ctx.lineTo(s * 0.65, s * 0.7); ctx.lineTo(0, s * 0.35); ctx.lineTo(-s * 0.65, s * 0.7); ctx.closePath(); ctx.fill(); ctx.stroke(); ctx.restore();
+  }
+  if (opts.mark) { ctx.fillStyle = '#ffb347'; ctx.strokeStyle = '#000'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(X(opts.mark.x), Z(opts.mark.z), 8, 0, Math.PI * 2); ctx.fill(); ctx.stroke(); }
+}
+
+// ───────────────────────────────────────────── regions / loot spawn
+const REGIONS = [
+  { label: '폐도시', x: -100, z: 160, rx: 200, rz: 170, loot: 34 },
+  { label: '항구', x: 345, z: 330, rx: 110, rz: 70, loot: 18 },
+  { label: '발전소', x: 300, z: -110, rx: 110, rz: 95, loot: 14 },
+  { label: '언덕 마을', x: -370, z: -250, rx: 100, rz: 90, loot: 14 },
+  { label: '등대', x: -590, z: 255, rx: 30, rz: 30, loot: 3 },
+  { label: '무선탑', x: 70, z: -400, rx: 30, rz: 30, loot: 3 },
+];
+function landPoint(cx, cz, rx, rz, minH = 1.5, tries = 40) {
+  for (let t = 0; t < tries; t++) {
+    const x = cx + rand(-rx, rx), z = cz + rand(-rz, rz);
+    if (Math.abs(x) > 820 || Math.abs(z) > 820) continue;
+    const th = terrainH(x, z); if (th < minH) continue;
+    const y = groundAt(x, z, th + 0.3);
+    if (blockedAt(x, z, y, 0.7)) continue;
+    return new THREE.Vector3(x, y, z);
+  }
+  return null;
+}
+
+// ───────────────────────────────────────────── weapons
+const WEAPONS = {
+  pistol: { id: 'pistol', name: '권총', dmg: 21, rate: 0.26, mag: 12, reload: 1.3, spread: 0.012, pellets: 1, auto: false, range: 160, zoom: 1.35, kick: 0.012, snd: { freq: 2600, len: 0.18, vol: 0.45 }, tier: 0 },
+  smg: { id: 'smg', name: '기관단총', dmg: 13, rate: 0.075, mag: 32, reload: 1.7, spread: 0.028, pellets: 1, auto: true, range: 120, zoom: 1.3, kick: 0.006, snd: { freq: 2300, len: 0.14, vol: 0.4 }, tier: 1 },
+  shotgun: { id: 'shotgun', name: '샷건', dmg: 12, rate: 0.85, mag: 6, reload: 2.6, spread: 0.075, pellets: 9, auto: false, range: 45, zoom: 1.2, kick: 0.04, snd: { freq: 1200, len: 0.4, vol: 0.7 }, tier: 1 },
+  rifle: { id: 'rifle', name: '돌격소총', dmg: 18, rate: 0.105, mag: 30, reload: 2.1, spread: 0.016, pellets: 1, auto: true, range: 280, zoom: 1.7, kick: 0.009, snd: { freq: 1800, len: 0.25, vol: 0.55 }, tier: 2 },
+  dmr: { id: 'dmr', name: '저격소총', dmg: 62, rate: 0.8, mag: 6, reload: 2.5, spread: 0.002, pellets: 1, auto: false, range: 600, zoom: 4, kick: 0.035, snd: { freq: 1400, len: 0.5, vol: 0.75 }, tier: 2, scope: true },
+};
+const newWeapon = id => ({ def: WEAPONS[id], mag: WEAPONS[id].mag, reserve: WEAPONS[id].mag * 2 });
+
+// ───────────────────────────────────────────── audio
+let AC = null, noiseBuf = null;
+function initAudio() {
+  try {
+    AC = new (window.AudioContext || window.webkitAudioContext)();
+    noiseBuf = AC.createBuffer(1, AC.sampleRate * 0.6, AC.sampleRate);
+    const d = noiseBuf.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / d.length, 2);
+  } catch { AC = null; }
+}
+function sound(s, pos) {
+  if (!AC) return;
+  const dist = pos ? pos.distanceTo(player.pos) : 0, vol = s.vol / (1 + dist / 30);
+  if (vol < 0.008) return;
+  const src = AC.createBufferSource(); src.buffer = noiseBuf;
+  const f = AC.createBiquadFilter(); f.type = 'lowpass'; f.frequency.value = s.freq / (1 + dist / 120);
+  const g = AC.createGain(), t = AC.currentTime; g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0008, t + s.len);
+  src.connect(f).connect(g).connect(AC.destination); src.start(t); src.stop(t + s.len + 0.05);
+}
+let windGain = null;
+function setWind(v) {
+  if (!AC) return;
+  if (!windGain) {
+    const buf = AC.createBuffer(1, AC.sampleRate * 2, AC.sampleRate), d = buf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+    const src = AC.createBufferSource(); src.buffer = buf; src.loop = true;
+    const f = AC.createBiquadFilter(); f.type = 'bandpass'; f.frequency.value = 500; f.Q.value = 0.6;
+    windGain = AC.createGain(); windGain.gain.value = 0;
+    src.connect(f).connect(windGain).connect(AC.destination); src.start();
+  }
+  windGain.gain.setTargetAtTime(v, AC.currentTime, 0.15);
+}
+function beep(freq, len = 0.08, vol = 0.15, type = 'square') {
+  if (!AC) return;
+  const o = AC.createOscillator(), g = AC.createGain(), t = AC.currentTime;
+  o.type = type; o.frequency.value = freq; g.gain.setValueAtTime(vol, t); g.gain.exponentialRampToValueAtTime(0.0008, t + len);
+  o.connect(g).connect(AC.destination); o.start(t); o.stop(t + len + 0.02);
+}
+
+// ───────────────────────────────────────────── characters
+const BOT_NAMES = ['까마귀', '늑대', '독수리', '여우', '표범', '매', '불곰', '살쾡이', '올빼미', '코브라', '하이에나', '들개', '멧돼지', '전갈', '상어', '박쥐', '부엉이', '족제비', '고라니'];
+const OUTFITS = [
+  { shirt: '#56603f', vest: '#3b4231', vest2: '#4a5238', pack: '#5d5a44', pants: '#3f4632', helmet: '#4a523a', accent: '#6b6047' },
+  { shirt: '#6e6250', vest: '#4a4234', vest2: '#5c5240', pack: '#7a6a4f', pants: '#544a3a', helmet: '#7d6e52', accent: '#3d3a33' },
+  { shirt: '#3e4a57', vest: '#262d35', vest2: '#323b45', pack: '#38424d', pants: '#2b333c', helmet: '#2a3038', accent: '#58636e' },
+  { shirt: '#5c6b6a', vest: '#2f3b3a', vest2: '#3e4c4a', pack: '#4f5c55', pants: '#3b4544', helmet: '#3a4746', accent: '#8a8670' },
+  { shirt: '#4b4b4b', vest: '#222222', vest2: '#303030', pack: '#3a3a3a', pants: '#2e2e2e', helmet: '#1f1f1f', accent: '#7a2f2f' },
+  { shirt: '#7a705c', vest: '#59513f', vest2: '#6a604b', pack: '#4b4536', pants: '#5b5444', helmet: '#8a7f63', accent: '#43553a' },
+];
+const SKINS = ['#e3c3a3', '#c99f7c', '#a77b58', '#8a5f40', '#f0d2b5'];
+const botOutfit = () => ({ ...pick(OUTFITS), skin: pick(SKINS) });
+
+class Actor {
+  constructor(name, colors) {
+    this.name = name; this.pos = new THREE.Vector3(); this.vel = new THREE.Vector3();
+    this.vy = 0; this.yaw = 0; this.pitch = 0; this.hp = 100; this.armor = 0; this.dead = false; this.kills = 0;
+    this.onGround = false; this.speedNow = 0; this.fireT = 0; this.mode = 'ground'; this.slide = false; this.sprinting = false;
+    this.reloadP = -1; this.healing = false; this.id = null;
+    this.rig = new Rig(scene, colors);
+    this.rig.onStep = run => footstep(this, run);
+    actors.push(this);
+  }
+  physics(dt, mx, mz, gravity = 24) {
+    const len = Math.hypot(mx, mz), steps = Math.max(1, Math.ceil(len / 0.35));
+    let blocked = false;
+    for (let s = 0; s < steps; s++) {
+      const ox = this.pos.x, oz = this.pos.z;
+      this.pos.x += mx / steps; this.pos.z += mz / steps;
+      const g2 = groundAt(this.pos.x, this.pos.z, this.pos.y);
+      if (g2 > this.pos.y + STEP + Math.hypot(mx / steps, mz / steps)) { this.pos.x = ox; this.pos.z = oz; blocked = true; }
+      if (resolve(this.pos, 0.42)) blocked = true;
+    }
+    const g = groundAt(this.pos.x, this.pos.z, this.pos.y);
+    this.vy -= gravity * dt; this.pos.y += this.vy * dt;
+    let impact = 0;
+    if (this.pos.y <= g || (this.onGround && this.vy <= 0 && this.pos.y - g < 0.5)) {
+      if (!this.onGround) impact = -this.vy;
+      this.pos.y = g; this.vy = 0; this.onGround = true;
+    } else this.onGround = false;
+    this.swimming = false;
+    if (terrainH(this.pos.x, this.pos.z) < SEA - 1.25 && this.pos.y < SEA - 1.25) {
+      this.pos.y = SEA - 1.25; this.vy = 0; this.onGround = true; this.swimming = true;
+    }
+    this.speedNow = len / Math.max(dt, 1e-4);
+    return { blocked, impact };
+  }
+  animate(dt) {
+    const far = this !== player && this.pos.distanceToSquared(player.pos) > 480 * 480;
+    if (this !== player) this.rig.root.visible = !far;
+    if (this.tag) this.tag.visible = !this.dead && this.pos.distanceToSquared(player.pos) < 120 * 120;
+    if (far) { this.rig.root.position.copy(this.pos); return; }
+    this.rig.update(dt, {
+      pos: this.pos, yaw: this.yaw, pitch: this.pitch, vx: this.vel.x, vz: this.vel.z, onGround: this.onGround,
+      sprint: this.sprinting, slide: this.slide, swim: this.swimming, mode: this.mode, reload: this.reloadP, heal: this.healing,
+    });
+  }
+  muzzle(out) { return this.rig.muzzleWorld(out); }
+}
+
+// ───────────────────────────────────────────── effects
+const UP = new THREE.Vector3(0, 1, 0);
+const tracers = [];
+const tracerGeo = new THREE.CylinderGeometry(0.02, 0.02, 1, 5, 1, true); tracerGeo.translate(0, 0.5, 0);
+const _tv = new THREE.Vector3();
+function tracer(a, b, w = 1) {
+  let t = tracers.find(t => t.life <= 0);
+  if (!t) {
+    t = { m: new THREE.Mesh(tracerGeo, new THREE.MeshBasicMaterial({ color: 0xffd98a, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false })), life: 0 };
+    t.m.frustumCulled = false; scene.add(t.m); tracers.push(t);
+  }
+  _tv.copy(b).sub(a); const len = _tv.length(); if (len < 0.5) return;
+  t.m.position.copy(a); t.m.scale.set(w, len, w); t.m.quaternion.setFromUnitVectors(UP, _tv.divideScalar(len));
+  t.life = 0.06; t.m.visible = true; t.m.material.opacity = 1;
+}
+const puffs = [];
+const puffGeo = new THREE.IcosahedronGeometry(0.09, 0);
+function puff(p, color, n = 5, spd = 3) {
+  for (let i = 0; i < n; i++) {
+    let q = puffs.find(q => q.life <= 0);
+    if (!q) { q = { m: new THREE.Mesh(puffGeo, new THREE.MeshBasicMaterial({ color, transparent: true })), v: new THREE.Vector3(), life: 0, max: 1 }; scene.add(q.m); puffs.push(q); }
+    q.m.material.color.set(color); q.m.position.copy(p); q.v.set(rand(-1, 1) * spd, rand(0.4, 1.3) * spd, rand(-1, 1) * spd);
+    q.life = q.max = rand(0.3, 0.55); q.m.visible = true; q.m.scale.setScalar(rand(0.7, 1.6));
+  }
+}
+const dmgNums = [];
+function dmgNum(pos, val, head) {
+  const el = document.createElement('div'); el.className = 'dn' + (head ? ' head' : ''); el.textContent = Math.max(1, Math.round(val));
+  $('dmgnums').append(el); dmgNums.push({ el, pos: pos.clone(), t: 0, dx: rand(-20, 20) });
+}
+const _proj = new THREE.Vector3();
+function updateFx(dt) {
+  for (const t of tracers) if (t.life > 0) { t.life -= dt; t.m.material.opacity = clamp(t.life / 0.06, 0, 1); if (t.life <= 0) t.m.visible = false; }
+  for (const q of puffs) if (q.life > 0) {
+    q.life -= dt; q.v.y -= 9 * dt; q.v.multiplyScalar(Math.exp(-2.5 * dt)); q.m.position.addScaledVector(q.v, dt);
+    q.m.material.opacity = clamp(q.life / q.max, 0, 1); if (q.life <= 0) q.m.visible = false;
+  }
+  for (let i = dmgNums.length - 1; i >= 0; i--) {
+    const d = dmgNums[i]; d.t += dt;
+    if (d.t > 0.9) { d.el.remove(); dmgNums.splice(i, 1); continue; }
+    _proj.copy(d.pos); _proj.y += 2 + d.t * 1.4; _proj.project(camera);
+    if (_proj.z > 1) { d.el.style.opacity = 0; continue; }
+    d.el.style.opacity = 1 - Math.max(0, d.t - 0.5) / 0.4;
+    d.el.style.transform = `translate(${(_proj.x * 0.5 + 0.5) * innerWidth + d.dx * d.t}px, ${(-_proj.y * 0.5 + 0.5) * innerHeight}px) translate(-50%,-50%) scale(${1 + Math.max(0, 0.15 - d.t) * 4})`;
+  }
+}
+function footstep(a, run) {
+  if (!AC || !player) return;
+  if (a !== player && a.pos.distanceToSquared(player.pos) > 45 * 45) return;
+  sound({ freq: 420 + run * 520, len: 0.06 + run * 0.02, vol: (a === player ? 0.07 : 0.12) + run * 0.06 }, a === player ? null : a.pos);
+}
+
+// ───────────────────────────────────────────── combat
+const BOT_DMG = 0.55;
+const isBotId = id => typeof id === 'string' && id.startsWith('b');
+function fireWeapon(shooter, origin, dir, def, spread) {
+  sound(def.snd, shooter === player ? null : origin);
+  shooter.rig.fire();
+  const end = new THREE.Vector3(), d = new THREE.Vector3(), ends = [];
+  for (let k = 0; k < def.pellets; k++) {
+    d.copy(dir);
+    d.x += rand(-1, 1) * spread; d.y += rand(-1, 1) * spread; d.z += rand(-1, 1) * spread; d.normalize();
+    const h = raycast(origin, d, def.range, shooter);
+    end.copy(origin).addScaledVector(d, Math.min(h.t, def.range));
+    if (k < 3) { tracer(_v3.copy(origin).addScaledVector(d, 0.3), end, def.id === 'dmr' ? 1.6 : 1); ends.push([+end.x.toFixed(2), +end.y.toFixed(2), +end.z.toFixed(2), h.ent ? 1 : h.t < def.range ? 2 : 0]); }
+    if (h.ent) {
+      let dmg = def.dmg * (h.head ? 1.8 : 1) * (shooter === player || shooter.remoteHuman ? 1 : BOT_DMG);
+      if (def.id === 'shotgun') dmg *= clamp(1.3 - h.t / 40, 0.25, 1);
+      puff(end, 0xa01818, 6, 2.5);
+      damage(h.ent, dmg, shooter, def.name, h.head, end);
+    } else if (h.t < def.range) puff(end, 0xc9c0aa, 4, 2);
+  }
+  if (NET.on && (shooter === player || (NET.isHost && shooter instanceof Bot)))
+    NET.send({ t: 'shot', s: shooter.id, w: def.id, o: [+origin.x.toFixed(2), +origin.y.toFixed(2), +origin.z.toFixed(2)], e: ends });
+}
+function damage(t, amount, by, wname, head, at) {
+  if (t.dead || state !== 'play') return;
+  // ── multiplayer: player HP lives on the server, bot HP on the host
+  if (NET.on && (t === player || t.remoteHuman || (isBotId(t.id) && !NET.isHost))) {
+    NET.send({ t: 'hit', target: t.id, dmg: +amount.toFixed(1), head: !!head, w: wname, by: by?.id || null, bn: by?.name || null });
+    if (by === player) { hud.hitT = 0.15; hud.hitHead = head; beep(head ? 1500 : 1100, 0.05, 0.08, 'triangle'); dmgNum(at || t.pos, amount, head); }
+    t.rig.hit(Math.random() < 0.5 ? -1 : 1);
+    return;
+  }
+  if (t.armor > 0 && by) { const a = Math.min(t.armor, amount * 0.5); t.armor -= a; amount -= a; }
+  t.hp -= amount;
+  t.rig.hit(Math.random() < 0.5 ? -1 : 1);
+  if (t === player) {
+    hud.hurt = 0.6; shake(0.28);
+    if (by) { hud.dmgAng = Math.atan2(-(by.pos.x - player.pos.x), -(by.pos.z - player.pos.z)); hud.dmgT = 1; }
+    healCancel();
+  } else {
+    if (by === player) { hud.hitT = 0.15; hud.hitHead = head; beep(head ? 1500 : 1100, 0.05, 0.08, 'triangle'); dmgNum(at || t.pos, amount, head); }
+    t.onHurt?.(by);
+  }
+  if (t.hp <= 0) kill(t, by, wname);
+}
+function deathVisual(t, by) {
+  if (t.rig.dead) return;
+  let dir = Math.random() < 0.5 ? 1 : -1;
+  if (by) { const bx = t.pos.x - by.pos.x, bz = t.pos.z - by.pos.z; dir = (bx * -Math.sin(t.yaw) + bz * -Math.cos(t.yaw)) < 0 ? 1 : -1; }
+  t.dead = true; t.hp = 0; t.rig.die(dir);
+}
+const deathText = (byName, wname, victim) => byName ? `${byName} <small>[${wname}]</small> ▸ ${victim}` : `${victim} — ${wname === '낙하' ? '낙하로' : wname === '이탈' ? '접속 종료로' : '자기장에서'} 사망`;
+function kill(t, by, wname) {
+  if (NET.on) {
+    // host-owned bot died: report it, the server announces the kill to everyone
+    if (t instanceof Bot && NET.isHost && !t.reported) {
+      t.reported = true; deathVisual(t, by);
+      NET.send({ t: 'botDied', id: t.id, name: t.name, by: by?.id || null, bn: by?.name || null, w: wname, pos: [t.pos.x, groundAt(t.pos.x, t.pos.z, t.pos.y + 0.5), t.pos.z] });
+    }
+    return;
+  }
+  deathVisual(t, by);
+  if (by && by !== t) by.kills++;
+  feed(deathText(by?.name, wname, t.name), by === player || t === player);
+  if (t === player) { endGame(false); return; }
+  spawnCrate(t.pos.clone().setY(groundAt(t.pos.x, t.pos.z, t.pos.y + 0.5)), 'drop');
+  if (by === player) killBanner(t.name);
+  if (aliveCount() === 1 && !player.dead) endGame(true);
+}
+function killBanner(name) { banner(`${name} 처치`); beep(700, 0.12, 0.1, 'sine'); setTimeout(() => beep(1050, 0.16, 0.1, 'sine'), 90); }
+const aliveCount = () => (NET.on ? NET.alive : actors.filter(a => !a.dead).length);
+
+// ───────────────────────────────────────────── crates
+const crates = [], crateById = new Map();
+const boxGeo = new THREE.BoxGeometry(1, 1, 1);
+const crateMat = new THREE.MeshStandardMaterial({ color: 0x7d5a33, roughness: 0.85 });
+const crateEdge = new THREE.MeshStandardMaterial({ color: 0x3a3632, roughness: 0.5, metalness: 0.5 });
+const dropMat = new THREE.MeshStandardMaterial({ color: 0x3b4a3a, roughness: 0.8 });
+const bandMat = new THREE.MeshBasicMaterial({ color: 0x7ff0ff });
+const beamGeo = new THREE.CylinderGeometry(0.06, 0.18, 6, 8, 1, true);
+const beamMat = new THREE.MeshBasicMaterial({ color: 0x9ff5ff, transparent: true, opacity: 0.28, depthWrite: false, blending: THREE.AdditiveBlending });
+let crateSeq = 0;
+function spawnCrate(p, kind = 'loot', id) {
+  const g = new THREE.Group(); g.position.copy(p); g.rotation.y = (p.x * 7.13 + p.z * 3.7) % Math.PI;
+  const add = (mat, sx, sy, sz, x, y, z) => { const m = new THREE.Mesh(boxGeo, mat); m.scale.set(sx, sy, sz); m.position.set(x, y, z); m.castShadow = m.receiveShadow = true; g.add(m); return m; };
+  add(kind === 'drop' ? dropMat : crateMat, 1.0, 0.6, 0.64, 0, 0.3, 0);
+  for (const x of [-0.47, 0.47]) add(crateEdge, 0.08, 0.64, 0.68, x, 0.3, 0);
+  add(crateEdge, 1.04, 0.07, 0.68, 0, 0.6, 0);
+  add(bandMat, 0.7, 0.03, 0.69, 0, 0.45, 0);
+  if (kind === 'loot') { const beam = new THREE.Mesh(beamGeo, beamMat); beam.position.y = 3.6; g.add(beam); }
+  scene.add(g);
+  const c = { id: id ?? 'c' + crateSeq++, g, pos: p.clone(), kind, open: false };
+  crates.push(c); crateById.set(c.id, c); return c;
+}
+// all clients place the same crates from the match seed
+function placeCrates(seed) {
+  for (const c of crates) scene.remove(c.g);
+  crates.length = 0; crateById.clear(); crateSeq = 0;
+  RNG = mulberry32(seed);
+  for (const r of REGIONS) for (let i = 0; i < r.loot; i++) { const p = landPoint(r.x, r.z, r.rx, r.rz); if (p) spawnCrate(p); }
+  for (let i = 0; i < 40; i++) { const p = landPoint(0, 0, 720, 720, 4); if (p) spawnCrate(p); }
+  RNG = Math.random;
+}
+function removeCrate(c) {
+  if (!c || c.open) return; c.open = true; scene.remove(c.g); puff(c.pos.clone().setY(c.pos.y + 0.6), 0x9ff5ff, 8, 2.5);
+}
+function requestCrate(c) {
+  if (NET.on) { if (!c.requested) { c.requested = true; NET.send({ t: 'open', id: c.id }); } return; }
+  removeCrate(c); rollLoot(c.kind);
+}
+function rollLoot(kind) {
+  const got = [];
+  const giveWeapon = () => {
+    const pool = ['smg', 'shotgun', 'rifle', 'rifle', 'dmr', 'smg', 'shotgun'];
+    const id = pick(pool); const w = newWeapon(id);
+    const slot = player.weapons[0] === null ? 0 : player.weapons[1] === null ? 1 : player.cur;
+    const old = player.weapons[slot];
+    if (old && old.def.id === id) { old.reserve += w.mag * 2; got.push(`${w.def.name} 탄약`); return; }
+    player.weapons[slot] = w; player.cur = slot; player.reloadT = 0; got.push(w.def.name);
+  };
+  const giveAmmo = () => { for (const w of player.weapons) if (w) w.reserve += w.def.mag * 2; got.push('탄약'); };
+  const giveMed = () => { player.meds += 1; got.push('구급상자'); };
+  const giveArmor = () => { if (NET.on) NET.send({ t: 'armor', amt: 50 }); else player.armor = Math.min(100, player.armor + 50); got.push('방탄복'); };
+  if (kind === 'drop') { giveAmmo(); giveMed(); if (Math.random() < 0.35) giveWeapon(); }
+  else {
+    const hasTwo = player.weapons[0] && player.weapons[1];
+    const r = Math.random();
+    if (r < (hasTwo ? 0.22 : 0.45)) giveWeapon(); else if (r < 0.65) giveAmmo(); else if (r < 0.85) giveMed(); else giveArmor();
+    if (Math.random() < 0.4) (Math.random() < 0.5 ? giveAmmo : giveMed)();
+  }
+  toast('+ ' + got.join(' · '));
+  beep(880, 0.06, 0.08, 'sine'); setTimeout(() => beep(1320, 0.08, 0.08, 'sine'), 70);
+}
+
+// ───────────────────────────────────────────── zone (pure function of match time, same on every client and the server)
+let zplan = null;
+const zone = { phase: 0, stage: 'wait', t: 0, cur: { x: 0, z: 0, r: 900 }, next: null, dps: 0.5, tick: 0 };
+const zoneWall = new THREE.Mesh(new THREE.CylinderGeometry(1, 1, 500, 128, 1, true), new THREE.MeshBasicMaterial({ color: 0x3fa0ff, transparent: true, opacity: 0.22, side: THREE.DoubleSide, depthWrite: false }));
+zoneWall.position.y = 150; scene.add(zoneWall);
+function updateZone(dt) {
+  if (!zplan) return;
+  const z = zoneAt(zplan, now);
+  if (z.phase !== zone.phase || z.stage !== zone.stage) {
+    if (z.stage === 'shrink') { banner('자기장 축소 시작'); beep(420, 0.3, 0.1, 'sawtooth'); }
+    else if (z.stage === 'wait' && z.phase > 0) { banner('자기장이 곧 좁혀집니다'); beep(520, 0.2, 0.1, 'sawtooth'); }
+    if (z.phase !== zone.phase) for (const b of bots) b.zoneGoal = null;
+  }
+  Object.assign(zone, { phase: z.phase, stage: z.stage, t: z.left, cur: z.cur, next: z.next, dps: z.dps });
+  zoneWall.position.x = zone.cur.x; zoneWall.position.z = zone.cur.z;
+  zoneWall.scale.set(Math.max(zone.cur.r, 0.5), 1, Math.max(zone.cur.r, 0.5));
+  zone.tick += dt;
+  if (zone.tick >= 1) {
+    zone.tick -= 1;
+    // players are damaged by the server in multiplayer; the host handles bots
+    const victims = NET.on ? (NET.isHost ? bots : []) : actors;
+    for (const a of victims) if (!a.dead && outsideZone(a.pos)) { a.hp -= zone.dps; if (a === player) { hud.hurt = Math.max(hud.hurt, 0.3); shake(0.08); } if (a.hp <= 0) kill(a, null, '자기장'); }
+  }
+}
+const outsideZone = p => Math.hypot(p.x - zone.cur.x, p.z - zone.cur.z) > zone.cur.r;
+
+// ───────────────────────────────────────────── bots
+const bots = [];
+const _v1 = new THREE.Vector3(), _v2 = new THREE.Vector3(), _v3 = new THREE.Vector3();
+const BOT_RANGE = { pistol: 22, smg: 18, shotgun: 8, rifle: 45, dmr: 90 };
+class Bot extends Actor {
+  constructor(name, id, weaponId) {
+    super(name, botOutfit());
+    this.id = id; actorById.set(id, this);
+    this.weapon = newWeapon(weaponId || pick(['pistol', 'pistol', 'smg', 'shotgun', 'rifle', 'rifle', 'dmr']));
+    this.rig.setWeapon(this.weapon.def.id);
+    this.armor = pick([0, 0, 25, 50]);
+    this.target = null; this.seenAt = -99; this.lastSeen = new THREE.Vector3();
+    this.think = rand(0, 0.4); this.react = 0; this.strafe = 1; this.strafeT = 0;
+    this.wander = null; this.zoneGoal = null; this.stuckT = 0; this.stuckFrom = new THREE.Vector3(); this.reloadT = 0;
+    this.skill = rand(0.75, 1.25); this.prev = new THREE.Vector3();
+  }
+  onHurt(by) {
+    if (by && !by.dead && (!this.target || this.target.dead || Math.random() < 0.6)) {
+      if (this.target !== by) this.react = rand(0.25, 0.5) * this.skill;
+      this.target = by; this.seenAt = now; this.lastSeen.copy(by.pos);
+    }
+  }
+  acquire() {
+    const rng = this.weapon.def.id === 'dmr' ? 220 : this.weapon.def.id === 'rifle' ? 170 : 120;
+    const cands = actors.filter(a => a !== this && !a.dead && a.pos.distanceToSquared(this.pos) < rng * rng)
+      .sort((a, b) => a.pos.distanceToSquared(this.pos) - b.pos.distanceToSquared(this.pos)).slice(0, 3);
+    let best = null;
+    for (const c of cands) {
+      const d = Math.hypot(c.pos.x - this.pos.x, c.pos.z - this.pos.z);
+      const ang = Math.atan2(-(c.pos.x - this.pos.x), -(c.pos.z - this.pos.z));
+      const diff = Math.abs(((ang - this.yaw + Math.PI * 3) % (Math.PI * 2)) - Math.PI);
+      if (diff > 1.95 && d > 15) continue;
+      if (!hasLOS(this, c)) continue;
+      if (!best || (c === player && d < 1.4 * best.d)) best = { a: c, d };
+    }
+    if (best) {
+      if (this.target !== best.a) this.react = rand(0.5, 0.95) * this.skill;
+      this.target = best.a; this.seenAt = now; this.lastSeen.copy(best.a.pos);
+    } else if (this.target && (this.target.dead || now - this.seenAt > 5)) this.target = null;
+  }
+  pickWander() {
+    const z = zone.next || zone.cur;
+    for (let t = 0; t < 10; t++) {
+      const r = Math.min(z.r * 0.8, 260), a = rand(0, Math.PI * 2), d = Math.sqrt(Math.random()) * r;
+      let cx = z.x + Math.cos(a) * d, cz = z.z + Math.sin(a) * d;
+      if (z.r > 300) { cx = this.pos.x + rand(-160, 160); cz = this.pos.z + rand(-160, 160); if (Math.hypot(cx - z.x, cz - z.z) > z.r * 0.85) continue; }
+      if (terrainH(cx, cz) > 1.5) { this.wander = new THREE.Vector3(cx, 0, cz); return; }
+    }
+    this.wander = new THREE.Vector3(z.x, 0, z.z);
+  }
+  zonePoint() {
+    const z = zone.next || zone.cur;
+    for (let t = 0; t < 12; t++) {
+      const a = rand(0, Math.PI * 2), d = Math.sqrt(Math.random()) * z.r * 0.6;
+      const x = z.x + Math.cos(a) * d, zz = z.z + Math.sin(a) * d;
+      if (terrainH(x, zz) > 1.5) return new THREE.Vector3(x, 0, zz);
+    }
+    return new THREE.Vector3(z.x, 0, z.z);
+  }
+  steer(dx, dz) {
+    const len = Math.hypot(dx, dz); if (len < 1e-3) return null; dx /= len; dz /= len;
+    for (const a of [0, 0.45, -0.45, 0.9, -0.9, 1.4, -1.4, 2.0, -2.0, 2.6, -2.6]) {
+      const ca = Math.cos(a), sa = Math.sin(a), rx = dx * ca - dz * sa, rz = dx * sa + dz * ca;
+      const px = this.pos.x + rx * 1.8, pz = this.pos.z + rz * 1.8;
+      if (terrainH(px, pz) < SEA - 0.4) continue;
+      if (groundAt(px, pz, this.pos.y) > this.pos.y + 1.5) continue;
+      if (blockedAt(px, pz, this.pos.y, 0.5)) continue;
+      return [rx, rz];
+    }
+    return null;
+  }
+  update(dt) {
+    if (this.dead) { this.animate(dt); return; }
+    this.think -= dt; this.react -= dt; this.fireT -= dt; this.strafeT -= dt;
+    if (this.think <= 0) { this.think = rand(0.3, 0.45); this.acquire(); }
+    if (this.reloadT > 0) { this.reloadT -= dt; if (this.reloadT <= 0) this.weapon.mag = this.weapon.def.mag; }
+    const def = this.weapon.def;
+    let goal = null, faceTo = null, speed = 5.6, strafe = 0;
+    const out = zone.cur && Math.hypot(this.pos.x - zone.cur.x, this.pos.z - zone.cur.z) > zone.cur.r - 8;
+    const nextOut = zone.next && Math.hypot(this.pos.x - zone.next.x, this.pos.z - zone.next.z) > zone.next.r * 0.9;
+    const tgt = this.target && !this.target.dead ? this.target : null;
+    const visible = tgt && now - this.seenAt < 0.6;
+    if (tgt) {
+      faceTo = visible ? tgt.pos : this.lastSeen;
+      const d = Math.hypot(tgt.pos.x - this.pos.x, tgt.pos.z - this.pos.z), want = BOT_RANGE[def.id];
+      if (!visible) { goal = this.lastSeen; speed = 7; }
+      else if (d > want * 1.3) { goal = tgt.pos; speed = 6.5; }
+      else if (d < want * 0.45) goal = _v3.set(this.pos.x * 2 - tgt.pos.x, 0, this.pos.z * 2 - tgt.pos.z);
+      else { strafe = this.strafe; speed = 4.6; }
+      if (this.strafeT <= 0) { this.strafeT = rand(0.6, 1.6); this.strafe = Math.random() < 0.5 ? -1 : 1; }
+      if (out || (nextOut && zone.stage === 'shrink')) { this.zoneGoal ||= this.zonePoint(); goal = this.zoneGoal; strafe = 0; speed = 8.5; }
+    } else {
+      if (out || nextOut) { this.zoneGoal ||= this.zonePoint(); goal = this.zoneGoal; speed = out ? 9 : 7.5; }
+      else { if (!this.wander || Math.hypot(this.wander.x - this.pos.x, this.wander.z - this.pos.z) < 4) this.pickWander(); goal = this.wander; }
+    }
+    let mx = 0, mz = 0;
+    if (goal) { const s = this.steer(goal.x - this.pos.x, goal.z - this.pos.z); if (s) { mx = s[0]; mz = s[1]; } }
+    else if (strafe && faceTo) {
+      const fx = faceTo.x - this.pos.x, fz = faceTo.z - this.pos.z, l = Math.hypot(fx, fz) || 1;
+      const s = this.steer((-fz / l) * strafe, (fx / l) * strafe); if (s) { mx = s[0]; mz = s[1]; } else this.strafe *= -1;
+      if (this.onGround && !this.swimming && Math.random() < dt * 0.45) this.vy = 7;
+    }
+    if (this.swimming) speed = 3;
+    this.sprinting = !visible && speed >= 7.5 && (mx || mz);
+    this.prev.copy(this.pos);
+    this.physics(dt, mx * speed * dt, mz * speed * dt);
+    const vx = (this.pos.x - this.prev.x) / dt, vz = (this.pos.z - this.prev.z) / dt, kv = 1 - Math.exp(-12 * dt);
+    this.vel.x += (vx - this.vel.x) * kv; this.vel.z += (vz - this.vel.z) * kv;
+    // facing / aim
+    const fp = faceTo || (mx || mz ? _v2.set(this.pos.x + mx, 0, this.pos.z + mz) : null);
+    if (fp) {
+      const want = Math.atan2(-(fp.x - this.pos.x), -(fp.z - this.pos.z));
+      const diff = ((want - this.yaw + Math.PI * 3) % (Math.PI * 2)) - Math.PI;
+      this.yaw += clamp(diff, -8 * dt, 8 * dt);
+    }
+    const wantPitch = tgt && visible ? Math.atan2(tgt.pos.y + 1.1 - (this.pos.y + 1.5), Math.hypot(tgt.pos.x - this.pos.x, tgt.pos.z - this.pos.z)) : 0;
+    this.pitch += (clamp(wantPitch, -1, 1) - this.pitch) * (1 - Math.exp(-8 * dt));
+    this.stuckT += dt;
+    if (this.stuckT > 2) {
+      if ((mx || mz) && this.stuckFrom.distanceTo(this.pos) < 1.2) { this.wander = null; this.zoneGoal = this.zoneGoal ? this.zonePoint() : null; this.strafe *= -1; this.yaw += rand(-2, 2); if (this.onGround) this.vy = 7; }
+      this.stuckT = 0; this.stuckFrom.copy(this.pos);
+    }
+    this.reloadP = this.reloadT > 0 ? 1 - this.reloadT / (def.reload * 1.2) : -1;
+    if (visible && this.react <= 0 && this.fireT <= 0 && this.reloadT <= 0) {
+      const want = Math.atan2(-(tgt.pos.x - this.pos.x), -(tgt.pos.z - this.pos.z));
+      const diff = Math.abs(((want - this.yaw + Math.PI * 3) % (Math.PI * 2)) - Math.PI);
+      const dist = tgt.pos.distanceTo(this.pos);
+      if (diff < 0.25 && dist < def.range) {
+        const o = this.muzzle(_v1);
+        const aim = _v2.set(tgt.pos.x, tgt.pos.y + (Math.random() < 0.12 ? 1.62 : 1.05), tgt.pos.z).sub(o).normalize();
+        const moving = tgt.speedNow > 2 ? 0.02 : 0;
+        const spread = (def.spread + 0.028 + moving + dist * 0.00012) * this.skill;
+        fireWeapon(this, o.clone(), aim.clone(), def, spread);
+        this.fireT = def.rate * (def.auto ? 1.5 : 1.35) * this.skill + (def.auto && Math.random() < 0.25 ? 0.5 : 0);
+        if (--this.weapon.mag <= 0) this.reloadT = def.reload * 1.2;
+      }
+    }
+    this.animate(dt);
+  }
+}
+
+// ───────────────────────────────────────────── player
+let player;
+const keys = {};
+let mouseDX = 0, mouseDY = 0, firing = false, aiming = false, sens = 1.2, now = 0;
+const MOVE = { walk: 6.4, sprint: 10.2, ads: 3.8, heal: 2.6, swim: 3.2, jump: 7.4, slideBoost: 13.5 };
+const PLAYER_OUTFITS = [
+  { shirt: '#b8682a', vest: '#2f342c', vest2: '#3e4438', pack: '#5a4a35', pants: '#2c3138', skin: '#e0b892', helmet: '#d88a34', accent: '#e8c06a' },
+  { shirt: '#2f6fb0', vest: '#26303a', vest2: '#35414e', pack: '#3d4a57', pants: '#2a2f36', skin: '#d6ab84', helmet: '#3b8ad8', accent: '#9fd0ff' },
+  { shirt: '#a33b3b', vest: '#2e2a2a', vest2: '#3d3434', pack: '#4f3a3a', pants: '#2b2b2e', skin: '#c99f7c', helmet: '#c84a4a', accent: '#ffb0a0' },
+  { shirt: '#7a4fa3', vest: '#2d2836', vest2: '#3b3447', pack: '#4a405a', pants: '#2b2833', skin: '#e3c3a3', helmet: '#9a68cc', accent: '#d6b8ff' },
+  { shirt: '#2f8f6a', vest: '#26332e', vest2: '#33443d', pack: '#3c5249', pants: '#29302d', skin: '#a77b58', helmet: '#3fb488', accent: '#a8f0d0' },
+  { shirt: '#c9b23a', vest: '#33302a', vest2: '#45402f', pack: '#5a523a', pants: '#2e2d29', skin: '#f0d2b5', helmet: '#e0c840', accent: '#fff2a0' },
+];
+const outfitFor = id => PLAYER_OUTFITS[(parseInt(String(id).slice(1)) || 0) % PLAYER_OUTFITS.length];
+function addCanopy(a) {
+  const canopy = new THREE.Group();
+  const cloth = new THREE.Mesh(new THREE.SphereGeometry(3.4, 18, 6, 0, Math.PI * 2, 0, Math.PI / 2.4), new THREE.MeshStandardMaterial({ color: a.chuteColor || 0xe8893a, side: THREE.DoubleSide, roughness: 0.7 }));
+  cloth.scale.y = 0.5; cloth.castShadow = true; canopy.add(cloth);
+  const lineMat = new THREE.LineBasicMaterial({ color: 0x222222 });
+  for (let i = 0; i < 8; i++) {
+    const ang = (i / 8) * Math.PI * 2;
+    canopy.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(Math.cos(ang) * 3.0, 0.6, Math.sin(ang) * 3.0), new THREE.Vector3(0, -3.7, 0.05)]), lineMat));
+  }
+  canopy.position.y = 5.6; canopy.visible = false; a.rig.root.add(canopy); a.canopy = canopy;
+}
+function nameTag(a, text, color) {
+  const c = document.createElement('canvas'); c.width = 256; c.height = 64; const x = c.getContext('2d');
+  x.font = 'bold 30px Malgun Gothic, sans-serif'; x.textAlign = 'center'; x.textBaseline = 'middle';
+  x.lineWidth = 6; x.strokeStyle = 'rgba(0,0,0,.75)'; x.strokeText(text, 128, 32); x.fillStyle = color; x.fillText(text, 128, 32);
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(c), depthTest: false, transparent: true }));
+  s.scale.set(1.6, 0.4, 1); s.position.y = 2.25; s.renderOrder = 10; a.rig.root.add(s); a.tag = s;
+}
+function createPlayer(spawn, id = 'p0', name = '나') {
+  const outfit = NET.on ? outfitFor(id) : PLAYER_OUTFITS[0];
+  player = new Actor(name, outfit);
+  player.id = id; player.chuteColor = new THREE.Color(outfit.helmet).getHex();
+  player.pos.set(spawn.x, 300, spawn.z);
+  player.pitch = -0.35; player.weapons = [newWeapon('pistol'), null]; player.cur = 0; player.meds = 0; player.reloadT = 0;
+  player.healT = 0; player.dropping = true; player.mode = 'free'; player.weapons[0].reserve = 36;
+  player.slideT = 0; player.slideCD = 0; player.wantSlide = false; player.dropVy = -10;
+  player.rig.setWeapon('pistol');
+  addCanopy(player);
+  player.muzzleLight = new THREE.PointLight(0xffc070, 0, 14); scene.add(player.muzzleLight);
+}
+
+// ───────────────────────────────────────────── remote actors (other players, and bots on non-host clients)
+const FLAG = { ground: 1, sprint: 2, slide: 4, swim: 8, free: 16, chute: 32, heal: 64, dead: 128 };
+const WEAPON_IDS = ['pistol', 'smg', 'shotgun', 'rifle', 'dmr'];
+const actorById = new Map();
+function packState(a) {
+  const f = (a.onGround ? FLAG.ground : 0) | (a.sprinting ? FLAG.sprint : 0) | (a.slide ? FLAG.slide : 0) | (a.swimming ? FLAG.swim : 0)
+    | (a.mode === 'free' ? FLAG.free : 0) | (a.mode === 'chute' ? FLAG.chute : 0) | (a.healing ? FLAG.heal : 0) | (a.dead ? FLAG.dead : 0);
+  const r = v => Math.round(v * 100) / 100;
+  return { id: a.id, p: [r(a.pos.x), r(a.pos.y), r(a.pos.z)], y: r(a.yaw), pt: r(a.pitch), v: [r(a.vel.x), r(a.vel.z)], f, rl: r(a.reloadP), w: WEAPON_IDS.indexOf(a.rig.weaponId) };
+}
+class RemoteActor extends Actor {
+  constructor(id, name, human) {
+    super(name, human ? outfitFor(id) : botOutfit());
+    this.id = id; this.remoteHuman = human; this.snaps = []; this.seen = false; this.rig.root.visible = false;
+    this.onGround = true; actorById.set(id, this);
+    if (human) { this.chuteColor = new THREE.Color(outfitFor(id).helmet).getHex(); addCanopy(this); nameTag(this, name, '#ffd27a'); }
+  }
+  push(s) {
+    this.snaps.push({ t: performance.now(), p: s.p, y: s.y, pt: s.pt, v: s.v, f: s.f, rl: s.rl, w: s.w, hp: s.hp });
+    if (this.snaps.length > 12) this.snaps.shift();
+    if (!this.seen) { this.seen = true; this.pos.set(...s.p); this.yaw = s.y; }
+  }
+  update(dt) {
+    if (!this.seen) return;
+    if (this.dead) { this.animate(dt); return; }
+    const rt = performance.now() - 110, S = this.snaps;
+    let a = S[0], b = S[S.length - 1];
+    for (let i = 0; i < S.length - 1; i++) if (S[i].t <= rt && S[i + 1].t >= rt) { a = S[i]; b = S[i + 1]; break; }
+    const k = b.t > a.t ? clamp((rt - a.t) / (b.t - a.t), 0, 1) : 1;
+    this.pos.set(a.p[0] + (b.p[0] - a.p[0]) * k, a.p[1] + (b.p[1] - a.p[1]) * k, a.p[2] + (b.p[2] - a.p[2]) * k);
+    let dy = b.y - a.y; while (dy > Math.PI) dy -= Math.PI * 2; while (dy < -Math.PI) dy += Math.PI * 2;
+    this.yaw = a.y + dy * k; this.pitch = a.pt + (b.pt - a.pt) * k;
+    this.vel.set(b.v[0], 0, b.v[1]); this.speedNow = Math.hypot(b.v[0], b.v[1]);
+    const f = b.f;
+    this.onGround = !!(f & FLAG.ground); this.sprinting = !!(f & FLAG.sprint); this.slide = !!(f & FLAG.slide); this.swimming = !!(f & FLAG.swim);
+    this.mode = f & FLAG.free ? 'free' : f & FLAG.chute ? 'chute' : 'ground'; this.healing = !!(f & FLAG.heal); this.reloadP = b.rl;
+    if (b.hp != null) this.hp = b.hp;
+    if (b.w >= 0) this.rig.setWeapon(WEAPON_IDS[b.w]);
+    if (this.canopy) this.canopy.visible = this.mode === 'chute';
+    this.rig.root.visible = true;
+    this.animate(dt);
+  }
+}
+const curW = () => player.weapons[player.cur];
+function healCancel() { if (player && player.healT > 0) { player.healT = 0; toast('치료 취소'); } }
+function tryReload() {
+  const w = curW(); if (!w || player.reloadT > 0 || w.mag >= w.def.mag || w.reserve <= 0) return;
+  player.reloadT = w.def.reload; healCancel(); beep(300, 0.05, 0.05);
+}
+function switchTo(i) { if (player.weapons[i] && player.cur !== i) { player.cur = i; player.reloadT = 0; player.fireT = 0.25; beep(500, 0.04, 0.04); } }
+
+const camFwd = new THREE.Vector3(), camRight = new THREE.Vector3();
+function updatePlayer(dt) {
+  const p = player;
+  const zoomS = aiming ? 1 / Math.sqrt(curW()?.def.zoom || 1) : 1;
+  p.yaw -= mouseDX * 0.0022 * sens * zoomS;
+  p.pitch = clamp(p.pitch - mouseDY * 0.0022 * sens * zoomS, -1.3, 1.1);
+  mouseDX = mouseDY = 0;
+  if (p.dead) { p.animate(dt); return; }
+  const fx = -Math.sin(p.yaw), fz = -Math.cos(p.yaw);
+  let ix = 0, iz = 0;
+  if (keys.KeyW) { ix += fx; iz += fz; } if (keys.KeyS) { ix -= fx; iz -= fz; }
+  if (keys.KeyA) { ix += fz; iz -= fx; } if (keys.KeyD) { ix -= fz; iz += fx; }
+  const il = Math.hypot(ix, iz); if (il > 0) { ix /= il; iz /= il; }
+
+  // ── skydive / parachute
+  if (p.dropping) {
+    const g = groundAt(p.pos.x, p.pos.z, p.pos.y);
+    if (p.mode === 'free' && (p.pos.y - g < 60 || keys.Space && p.pos.y - g < 200)) { p.mode = 'chute'; p.canopy.visible = true; beep(200, 0.25, 0.08, 'triangle'); shake(0.35); keys.Space = false; }
+    const free = p.mode === 'free', diving = free && keys.KeyW;
+    const hs = free ? (diving ? 26 : 18) : 12;
+    const vyT = free ? (diving ? -55 : -38) : -7;
+    p.dropVy += (vyT - p.dropVy) * (1 - Math.exp(-(free ? 1.5 : 3) * dt));
+    p.vel.x += (ix * hs - p.vel.x) * (1 - Math.exp(-3 * dt)); p.vel.z += (iz * hs - p.vel.z) * (1 - Math.exp(-3 * dt));
+    p.pos.x = clamp(p.pos.x + p.vel.x * dt, -BOUND, BOUND); p.pos.z = clamp(p.pos.z + p.vel.z * dt, -BOUND, BOUND);
+    p.pos.y += p.dropVy * dt; p.speedNow = 0;
+    resolve(p.pos, 0.42);
+    if (p.mode === 'chute') p.canopy.rotation.z = Math.sin(now * 1.7) * 0.06 + clamp(-(p.vel.x * Math.cos(p.yaw) - p.vel.z * Math.sin(p.yaw)) * 0.02, -0.25, 0.25);
+    if (p.pos.y <= groundAt(p.pos.x, p.pos.z, p.pos.y)) {
+      p.dropping = false; p.mode = 'ground'; p.canopy.visible = false; p.vy = 0; p.onGround = true;
+      p.rig.land(10); shake(0.4); puff(p.pos.clone().setY(p.pos.y + 0.1), 0xb8ad90, 10, 3);
+      toast('착지! 보급 상자를 찾으세요');
+    }
+    p.animate(dt); return;
+  }
+
+  // ── actions
+  p.fireT -= dt; p.slideCD -= dt;
+  const w = curW();
+  if (w && p.rig.weaponId !== w.def.id) p.rig.setWeapon(w.def.id);
+  if (p.reloadT > 0) { p.reloadT -= dt; if (p.reloadT <= 0 && w) { const n = Math.min(w.def.mag - w.mag, w.reserve); w.mag += n; w.reserve -= n; beep(420, 0.05, 0.05); } }
+  if (p.healT > 0) { p.healT -= dt; if (p.healT <= 0) { p.meds--; if (NET.on) NET.send({ t: 'heal', amt: 45 }); else p.hp = Math.min(100, p.hp + 45); toast('+45 체력'); beep(660, 0.12, 0.08, 'sine'); } }
+  const hsp = Math.hypot(p.vel.x, p.vel.z);
+  const fwdInput = iz * fz + ix * fx;
+  p.sprinting = !!keys.ShiftLeft && !aiming && !firing && p.healT <= 0 && fwdInput > 0.3 && !p.slide && !p.swimming;
+
+  // ── slide (C while running)
+  if (p.wantSlide) {
+    p.wantSlide = false;
+    if (p.onGround && !p.swimming && hsp > 6.5 && p.slideCD <= 0 && !p.slide) {
+      p.slide = true; p.slideT = 0.9; const k = Math.max(hsp, MOVE.slideBoost) / hsp;
+      p.vel.x *= k; p.vel.z *= k; shake(0.12); healCancel();
+      sound({ freq: 900, len: 0.5, vol: 0.18 }, null);
+    }
+  }
+  if (p.slide) {
+    p.slideT -= dt;
+    const decay = Math.exp(-1.15 * dt); p.vel.x *= decay; p.vel.z *= decay;
+    const gx = (terrainH(p.pos.x + 1, p.pos.z) - terrainH(p.pos.x - 1, p.pos.z)) / 2, gz = (terrainH(p.pos.x, p.pos.z + 1) - terrainH(p.pos.x, p.pos.z - 1)) / 2;
+    p.vel.x -= gx * 16 * dt; p.vel.z -= gz * 16 * dt;
+    p.vel.x += ix * 3 * dt; p.vel.z += iz * 3 * dt;
+    if (p.slideT <= 0 || Math.hypot(p.vel.x, p.vel.z) < 4.5 || !p.onGround) { p.slide = false; p.slideCD = 0.45; }
+  } else {
+    let speed = MOVE.walk;
+    if (p.sprinting) speed = MOVE.sprint; if (aiming) speed = MOVE.ads; if (p.healT > 0) speed = MOVE.heal; if (p.swimming) speed = MOVE.swim;
+    if (p.onGround) {
+      const k = 1 - Math.exp(-(il > 0 ? 14 : 10) * dt);
+      p.vel.x += (ix * speed - p.vel.x) * k; p.vel.z += (iz * speed - p.vel.z) * k;
+    } else {
+      // air control keeps momentum: only accelerate toward input, never brake hard
+      const k = 1 - Math.exp(-2.2 * dt), tx = ix * Math.max(speed, hsp), tz = iz * Math.max(speed, hsp);
+      if (il > 0) { p.vel.x += (tx - p.vel.x) * k; p.vel.z += (tz - p.vel.z) * k; }
+    }
+  }
+  if (keys.Space && p.onGround && !p.swimming) {
+    p.vy = MOVE.jump; p.onGround = false; keys.Space = false;
+    if (p.slide) { p.slide = false; p.slideCD = 0.3; const k = 1.08; p.vel.x *= k; p.vel.z *= k; }
+    sound({ freq: 380, len: 0.08, vol: 0.06 }, null);
+  }
+  const r = p.physics(dt, p.vel.x * dt, p.vel.z * dt);
+  if (r.blocked && p.slide) { p.vel.multiplyScalar(0.6); }
+  if (r.impact > 5) {
+    p.rig.land(r.impact); shake(Math.min(0.5, r.impact * 0.022));
+    if (r.impact > 9) puff(p.pos.clone().setY(p.pos.y + 0.1), 0xb8ad90, 6, 2);
+    sound({ freq: 300, len: 0.12, vol: 0.12 + r.impact * 0.01 }, null);
+  }
+  if (r.impact > 17) {
+    const dmg = (r.impact - 17) * 5; hud.hurt = 0.6; toast(`낙하 피해 -${Math.round(dmg)}`);
+    if (NET.on) NET.send({ t: 'selfdmg', amt: Math.round(dmg), w: '낙하' });
+    else { p.hp -= dmg; if (p.hp <= 0) kill(p, null, '낙하'); }
+  }
+
+  // ── shooting
+  if (firing && w && p.fireT <= 0 && p.reloadT <= 0 && p.healT <= 0 && !p.sprinting) {
+    if (w.mag <= 0) {
+      if (w.reserve <= 0) { toast('탄약이 없습니다'); beep(180, 0.05, 0.05); firing = false; p.fireT = 0.3; }
+      else { tryReload(); if (!w.def.auto) firing = false; }
+    } else {
+      const def = w.def;
+      camera.getWorldDirection(camFwd);
+      const camDist = camera.position.distanceTo(p.pos) * 0.9;
+      const camOrigin = camera.position.clone().addScaledVector(camFwd, camDist);
+      const h = raycast(camOrigin, camFwd, def.range, p);
+      const target = camOrigin.clone().addScaledVector(camFwd, Math.min(h.t, def.range));
+      const o = p.muzzle(new THREE.Vector3());
+      const dir = target.sub(o).normalize();
+      const spread = def.spread * (aiming ? 0.45 : 1) + (p.speedNow > 1 ? 0.012 : 0) + (p.onGround ? 0 : 0.05) + (p.slide ? 0.02 : 0);
+      fireWeapon(p, o, dir, def, spread);
+      p.muzzleLight.position.copy(o); p.muzzleLight.intensity = 40; setTimeout(() => (p.muzzleLight.intensity = 0), 40);
+      p.fireT = def.rate; w.mag--;
+      p.pitch += def.kick * (aiming ? 0.6 : 1); p.yaw += rand(-0.4, 0.4) * def.kick;
+      hud.bloom = Math.min(1, hud.bloom + 0.3);
+      shake(def.kick * (def.pellets > 1 ? 6 : 3.5)); cam.fovKick += def.kick * 35;
+      if (!def.auto) firing = false;
+      if (w.mag === 0) tryReload();
+    }
+  }
+  p.reloadP = p.reloadT > 0 && w ? 1 - p.reloadT / w.def.reload : -1;
+  p.healing = p.healT > 0;
+  p.animate(dt);
+  let nearC = null, nd = 2.6;
+  for (const c of crates) if (!c.open) { const d = c.pos.distanceTo(p.pos); if (d < nd) { nd = d; nearC = c; } }
+  p.nearCrate = nearC;
+}
+
+// ───────────────────────────────────────────── camera
+const cam = { pivot: new THREE.Vector3(), init: false, trauma: 0, fovKick: 0, roll: 0, back: 3.3 };
+function shake(a) { cam.trauma = Math.min(1, cam.trauma + a); }
+function updateCamera(dt) {
+  const p = player;
+  const def = curW()?.def;
+  const ads = aiming && !p.dropping && !p.dead;
+  const hsp = Math.hypot(p.vel.x, p.vel.z);
+  let fov = 72;
+  if (p.mode === 'free') fov = keys.KeyW ? 98 : 90; else if (p.mode === 'chute') fov = 80;
+  else if (p.slide) fov = 90; else if (p.sprinting) fov = 84; else fov = 72 + clamp(hsp - 6.5, 0, 6) * 1.2;
+  if (ads) fov = 72 / (def?.zoom || 1);
+  cam.fovKick *= Math.exp(-10 * dt);
+  camera.fov += (fov + cam.fovKick - camera.fov) * Math.min(1, 9 * dt); camera.updateProjectionMatrix();
+  const pivotH = p.slide ? 1.05 : p.swimming ? 0.65 : p.mode !== 'ground' ? 1.3 : 1.62;
+  const tx = p.pos.x, ty = p.pos.y + pivotH, tz = p.pos.z;
+  if (!cam.init) { cam.pivot.set(tx, ty, tz); cam.init = true; }
+  const kh = 1 - Math.exp(-30 * dt), kv = 1 - Math.exp(-14 * dt);
+  cam.pivot.x += (tx - cam.pivot.x) * kh; cam.pivot.z += (tz - cam.pivot.z) * kh;
+  cam.pivot.y += (ty - cam.pivot.y) * (p.dropping ? kh : kv);
+  // roll into strafes and slides
+  camRight.set(Math.cos(p.yaw), 0, -Math.sin(p.yaw));
+  const strafe = (p.vel.x * camRight.x + p.vel.z * camRight.z) / 10;
+  cam.roll += ((-strafe * 0.035 + (p.slide ? 0.06 : 0)) - cam.roll) * (1 - Math.exp(-6 * dt));
+  // shake
+  cam.trauma = Math.max(0, cam.trauma - dt * 1.7);
+  const tr = cam.trauma * cam.trauma, t = performance.now() / 1000;
+  const n1 = Math.sin(t * 37.1) + Math.sin(t * 23.7 + 1.3) * 0.5, n2 = Math.sin(t * 41.3 + 1) + Math.sin(t * 19.1) * 0.5, n3 = Math.sin(t * 31.7 + 2);
+  let bob = 0;
+  if (p.onGround && !p.slide && hsp > 1) bob = Math.sin(p.rig.phase * 2) * (p.sprinting ? 0.045 : 0.018);
+  camera.rotation.set(p.pitch + n2 * 0.03 * tr, p.yaw + n1 * 0.03 * tr, cam.roll + n3 * 0.04 * tr);
+  camera.getWorldDirection(camFwd);
+  const backT = p.mode === 'free' ? 7.5 : p.mode === 'chute' ? 7 : ads ? 1.55 : p.dead ? 6 : p.slide ? 2.9 : p.sprinting ? 3.8 : 3.3;
+  cam.back += (backT - cam.back) * (1 - Math.exp(-8 * dt));
+  const side = p.mode !== 'ground' ? 0 : ads ? 0.55 : 0.68;
+  const pivot = _v1.copy(cam.pivot);
+  pivot.y += bob;
+  const want = _v2.copy(pivot).addScaledVector(camRight, side).addScaledVector(camFwd, -cam.back);
+  want.y += ads ? 0.1 : 0.28;
+  const dir = _v3.copy(want).sub(pivot); const len = dir.length(); dir.divideScalar(len);
+  const h = raycast(pivot, dir, len, null, false);
+  const dist = Math.max(0.3, Math.min(len, h.t - 0.25));
+  camera.position.copy(pivot).addScaledVector(dir, dist);
+  camera.position.addScaledVector(camRight, n1 * 0.12 * tr); camera.position.y += n2 * 0.1 * tr;
+  const th = terrainH(camera.position.x, camera.position.z) + 0.3;
+  if (camera.position.y < th) camera.position.y = th;
+  p.rig.root.visible = dist > 0.9 || p.dropping;
+  sun.position.copy(p.pos).addScaledVector(SUN_DIR, 350); sun.target.position.copy(p.pos);
+  sky.position.copy(camera.position);
+  // speed effects
+  let sfx = clamp((hsp - 8.5) / 5, 0, 1);
+  if (p.mode === 'free') sfx = keys.KeyW ? 1 : 0.7; else if (p.mode === 'chute') sfx = 0.1;
+  if (p.slide) sfx = Math.max(sfx, 0.75);
+  if (ads || p.dead) sfx = 0;
+  cam.speedFx = (cam.speedFx || 0) + (sfx - (cam.speedFx || 0)) * (1 - Math.exp(-6 * dt));
+  drawSpeedLines(cam.speedFx);
+  setWind(p.mode === 'free' ? (keys.KeyW ? 0.22 : 0.15) : p.mode === 'chute' ? 0.04 : cam.speedFx * 0.06);
+}
+const speedCv = $('speed'), sctx = speedCv.getContext('2d');
+function sizeSpeed() { speedCv.width = Math.round(innerWidth / 2); speedCv.height = Math.round(innerHeight / 2); }
+sizeSpeed(); addEventListener('resize', sizeSpeed);
+function drawSpeedLines(k) {
+  const Wd = speedCv.width, Ht = speedCv.height;
+  if (k < 0.03) { if (speedCv.dataset.on) { sctx.clearRect(0, 0, Wd, Ht); delete speedCv.dataset.on; } return; }
+  speedCv.dataset.on = 1; sctx.clearRect(0, 0, Wd, Ht);
+  const cx = Wd / 2, cy = Ht / 2, R = Math.hypot(cx, cy), n = Math.floor(20 + 70 * k);
+  sctx.lineCap = 'round';
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2, r0 = R * (0.42 + Math.random() * 0.3), r1 = r0 + R * (0.08 + Math.random() * 0.3) * k;
+    sctx.strokeStyle = `rgba(235,245,255,${(0.05 + Math.random() * 0.22) * k})`; sctx.lineWidth = 0.6 + Math.random() * 1.6;
+    sctx.beginPath(); sctx.moveTo(cx + Math.cos(a) * r0, cy + Math.sin(a) * r0); sctx.lineTo(cx + Math.cos(a) * r1, cy + Math.sin(a) * r1); sctx.stroke();
+  }
+}
+
+// ───────────────────────────────────────────── HUD
+const hud = { hurt: 0, hitT: 0, hitHead: false, dmgT: 0, dmgAng: 0, bloom: 0, slow: 0 };
+function feed(html, mine) {
+  const d = document.createElement('div'); d.innerHTML = html; if (mine) d.className = 'me';
+  $('feed').prepend(d);
+  setTimeout(() => { d.style.opacity = 0; setTimeout(() => d.remove(), 700); }, 6000);
+  while ($('feed').children.length > 6) $('feed').lastChild.remove();
+}
+let toastTO, bannerTO;
+function toast(t) { const e = $('toast'); e.textContent = t; e.style.opacity = 1; clearTimeout(toastTO); toastTO = setTimeout(() => (e.style.opacity = 0), 1800); }
+function banner(t) { const e = $('banner'); e.textContent = t; e.style.opacity = 1; clearTimeout(bannerTO); bannerTO = setTimeout(() => (e.style.opacity = 0), 2200); }
+function updateHUD(dt) {
+  const p = player;
+  hud.slow -= dt; hud.hurt = Math.max(0, hud.hurt - dt); hud.hitT -= dt; hud.dmgT -= dt * 0.8; hud.bloom = Math.max(0, hud.bloom - dt * 3);
+  $('vignette').style.boxShadow = `inset 0 0 ${120 + (1 - p.hp / 100) * 120}px rgba(255,30,20,${Math.max(hud.hurt, p.hp < 35 ? 0.35 : 0)})`;
+  const hit = $('hit'); hit.style.opacity = hud.hitT > 0 ? 1 : 0; hit.className = hud.hitHead ? 'head' : '';
+  const di = $('dmgdir').firstElementChild;
+  di.style.opacity = clamp(hud.dmgT, 0, 1);
+  di.style.transform = `rotate(${(-(hud.dmgAng - p.yaw) * 180) / Math.PI}deg)`;
+  const w = curW();
+  $('scope').style.opacity = aiming && w?.def.scope && !p.dropping ? 1 : 0;
+  const cr = $('cross'); cr.style.transform = `translate(-50%,-50%) scale(${1 + hud.bloom * 0.6 + (p.speedNow > 1 ? 0.3 : 0) + (p.onGround ? 0 : 0.5)})`; cr.style.opacity = p.dropping || p.sprinting ? 0 : 1;
+  $('zonetint').style.opacity = zone.cur && !p.dead && outsideZone(p.pos) ? 1 : 0;
+  $('action').classList.toggle('hidden', !(p.healT > 0 || p.reloadT > 0));
+  if (p.healT > 0) { $('actiontxt').textContent = '치료 중'; $('actionbar').style.width = (1 - p.healT / 3) * 100 + '%'; }
+  else if (p.reloadT > 0 && w) { $('actiontxt').textContent = '재장전'; $('actionbar').style.width = (1 - p.reloadT / w.def.reload) * 100 + '%'; }
+  const pr = $('prompt');
+  if (p.nearCrate && !p.dropping) { pr.classList.remove('hidden'); pr.innerHTML = `<b>[E]</b> ${p.nearCrate.kind === 'drop' ? '전리품 줍기' : '보급 상자 열기'}`; }
+  else if (p.mode === 'free') { pr.classList.remove('hidden'); pr.innerHTML = `<b>[W]</b> 급강하 · <b>[Space]</b> 낙하산 펼치기 · 고도 ${Math.round(p.pos.y - groundAt(p.pos.x, p.pos.z, p.pos.y))}m`; }
+  else pr.classList.add('hidden');
+  if (hud.slow > 0) return;
+  hud.slow = 0.1;
+  $('alive').textContent = aliveCount(); $('kills').textContent = p.kills;
+  $('hpbar').firstElementChild.style.width = clamp(p.hp, 0, 100) + '%'; $('hpbar').classList.toggle('low', p.hp < 35);
+  $('hptxt').textContent = Math.max(0, Math.ceil(p.hp));
+  $('arbar').firstElementChild.style.width = p.armor + '%';
+  $('meds').textContent = p.meds; $('armor').textContent = Math.round(p.armor);
+  $('spd').textContent = Math.round(Math.hypot(p.vel.x, p.vel.z) * 3.6);
+  for (let i = 0; i < 2; i++) {
+    const ww = p.weapons[i];
+    $('slot' + i).classList.toggle('on', i === p.cur);
+    $('wname' + i).textContent = ww ? `${i + 1}  ${ww.def.name}` : `${i + 1}  비어 있음`;
+    $('wammo' + i).innerHTML = ww ? `${ww.mag}<small> / ${ww.reserve}</small>` : '';
+  }
+  const zm = $('zonemsg');
+  if (zone.stage === 'final') { zm.textContent = '최종 자기장'; zm.className = 'warn'; }
+  else if (zone.stage === 'wait') { zm.textContent = `자기장 축소까지 ${fmt(zone.t)}`; zm.className = ''; }
+  else { zm.textContent = `자기장 축소 중 ${fmt(zone.t)}`; zm.className = 'warn'; }
+  if (outsideZone(p.pos) && !p.dropping) zm.textContent += '  ·  안전구역 밖!';
+  drawMap($('mini'), p.pos.x, p.pos.z, 420, { zone: true, player: true });
+  if (!$('bigmap').classList.contains('hidden')) drawMap($('bigmap'), 0, 0, 1700, { zone: true, player: true });
+}
+
+// ───────────────────────────────────────────── game flow
+let state = 'loading', landing = null, endT = 0, matchStart = 0;
+function spawnBots(n, spawn) {
+  for (let i = 0; i < n; i++) {
+    const b = new Bot(BOT_NAMES[i % BOT_NAMES.length] + (i >= BOT_NAMES.length ? ' ' + (i + 1) : ''), 'b' + i);
+    let p = null;
+    for (let t = 0; t < 60 && !p; t++) { const c = landPoint(0, 0, 700, 700, 2, 1); if (c && c.distanceTo(spawn) > 110) p = c; }
+    b.pos.copy(p || landPoint(0, 0, 600, 600, 2, 200)); b.yaw = rand(0, Math.PI * 2); b.onGround = true;
+    bots.push(b);
+  }
+}
+function pickSpawn() { return landing || landPoint(0, 0, 500, 500, 4, 200) || new THREE.Vector3(-100, 17, 160); }
+function beginPlay() {
+  $('start').classList.add('hidden'); $('hud').classList.remove('hidden');
+  state = 'play'; canvas.requestPointerLock();
+}
+// single player
+function startGame() {
+  NET.on = false; initAudio();
+  const seed = (Math.random() * 2 ** 31) | 0;
+  zplan = zonePlan(seed, terrainH); placeCrates(seed);
+  const spawn = pickSpawn();
+  createPlayer(spawn);
+  spawnBots(19, spawn);
+  now = 0; beginPlay();
+}
+function endGame(win) {
+  if (state === 'end') return;
+  state = 'ending'; endT = 1.8;
+  const rank = win ? 1 : aliveCount() + 1;
+  $('endtitle').textContent = win ? '최후의 생존자!' : '사망';
+  $('endtitle').style.color = win ? 'var(--accent)' : 'var(--bad)';
+  $('endstats').innerHTML = `순위 <b>#${rank}</b> / 20<br>처치 <b>${player.kills}</b><br>생존 시간 <b>${fmt(now)}</b>`;
+  if (win) banner('승리!');
+}
+
+// ───────────────────────────────────────────── multiplayer
+const NET = {
+  on: false, ws: null, connected: false, id: null, hostId: null, isHost: false, alive: 0, lobby: [], phase: 'lobby',
+  names: new Map(), ips: [], port: location.port || 80, sendT: 0, botT: 0,
+  send(o) { if (this.ws && this.ws.readyState === 1) this.ws.send(JSON.stringify(o)); },
+};
+const store = { get: k => { try { return localStorage.getItem(k); } catch { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch {} } };
+const myName = () => ($('pname').value.trim() || '생존자' + Math.floor(Math.random() * 900 + 100)).slice(0, 12);
+function connectNet() {
+  if (NET.ws || location.protocol === 'file:') return;
+  store.set('gh_name', $('pname').value.trim());
+  let ws;
+  try { ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws'); } catch { $('lobbyinfo').textContent = '서버에 연결할 수 없습니다.'; return; }
+  NET.ws = ws; $('lobby').classList.remove('hidden'); $('lobbyinfo').textContent = '서버에 연결하는 중…';
+  ws.onopen = () => NET.send({ t: 'hello', name: myName() });
+  ws.onmessage = e => { let m; try { m = JSON.parse(e.data); } catch { return; } onNet(m); };
+  ws.onclose = () => {
+    NET.connected = false; NET.ws = null; renderLobby();
+    if (NET.on && state === 'play') banner('서버 연결이 끊겼습니다');
+  };
+}
+function renderLobby() {
+  const info = $('lobbyinfo'), list = $('lobbylist');
+  if (!NET.connected) { info.innerHTML = '서버와 연결되지 않았습니다. <b>start_game.bat</b>(node serve.js)로 실행했는지 확인하세요.'; list.innerHTML = ''; $('hostctl').classList.add('hidden'); return; }
+  const local = /^(localhost|127\.|192\.168\.|10\.|172\.)/.test(location.hostname);
+  if (local) {
+    const addrs = NET.ips.map(ip => `<code>http://${ip}:${NET.port}</code>`).join(' · ');
+    info.innerHTML = `같은 네트워크의 친구는 ${addrs || '이 PC의 IP 주소'} 로 접속하면 됩니다.<br>인터넷 친구와 하려면 <b>start_online.bat</b>로 실행하세요.`;
+  } else info.innerHTML = `친구에게 이 주소를 보내세요: <code>${location.origin}</code>`;
+  list.innerHTML = NET.lobby.map(p => `<li>${p.id === NET.hostId ? '👑 ' : ''}${escapeHtml(p.name)}${p.id === NET.id ? ' <small>(나)</small>' : ''}${p.inMatch ? ' <small>· 경기 중</small>' : ''}</li>`).join('');
+  const amHost = NET.id === NET.hostId;
+  $('hostctl').classList.toggle('hidden', !amHost || NET.phase !== 'lobby');
+  $('waitmsg').textContent = NET.phase === 'match' ? '경기가 진행 중입니다. 끝나면 다음 경기에 참가할 수 있습니다.' : amHost ? '' : '방장이 경기를 시작하기를 기다리는 중…';
+  if (amHost && !$('botn').dataset.touched) { const v = Math.max(0, 20 - NET.lobby.length); $('botn').value = v; $('botnv').textContent = v; }
+}
+const escapeHtml = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+function getRemote(id, name, human) { return actorById.get(id) || new RemoteActor(id, name || id, human); }
+function startMatch(m) {
+  if (state === 'play' || state === 'ending') return;
+  NET.on = true; NET.hostId = m.hostId; NET.isHost = m.hostId === NET.id; NET.alive = m.players.length + m.bots;
+  NET.names = new Map(m.players.map(p => [p.id, p.name]));
+  initAudio();
+  zplan = m.plan; placeCrates(m.seed);
+  const spawn = pickSpawn();
+  createPlayer(spawn, NET.id, NET.names.get(NET.id) || '나'); actorById.set(NET.id, player);
+  for (const p of m.players) if (p.id !== NET.id) getRemote(p.id, p.name, true);
+  if (NET.isHost) spawnBots(m.bots, spawn);
+  matchStart = performance.now(); now = 0;
+  beginPlay();
+  toast(NET.isHost ? '방장: 봇 계산을 이 PC가 맡습니다' : `${m.players.length}명 + 봇 ${m.bots}명 경기 시작`);
+}
+// the new host takes over the bots it has been mirroring
+function promoteBots() {
+  for (const a of [...actors]) {
+    if (!(a instanceof RemoteActor) || a.remoteHuman || a.dead || !a.seen) continue;
+    const last = a.snaps[a.snaps.length - 1];
+    const b = new Bot(a.name, a.id, WEAPON_IDS[last?.w] || 'rifle');
+    b.pos.copy(a.pos); b.yaw = a.yaw; b.hp = last?.hp ?? 100; b.onGround = true;
+    scene.remove(a.rig.root); actors.splice(actors.indexOf(a), 1);
+    bots.push(b);
+  }
+}
+function onLocalDeath(rank) {
+  deathVisual(player, null);
+  document.exitPointerLock();
+  $('endtitle').textContent = '사망'; $('endtitle').style.color = 'var(--bad)';
+  $('endstats').innerHTML = `순위 <b>#${rank}</b><br>처치 <b>${player.kills}</b><br>생존 시간 <b>${fmt(now)}</b><br><small>경기는 계속 진행 중입니다</small>`;
+  $('spectate').classList.remove('hidden');
+  setTimeout(() => $('end').classList.remove('hidden'), 1500);
+}
+function onNet(m) {
+  switch (m.t) {
+    case 'welcome': NET.connected = true; NET.id = m.id; NET.hostId = m.hostId; NET.phase = m.phase; NET.ips = m.ips || []; NET.port = m.port; renderLobby(); break;
+    case 'lobby': NET.lobby = m.players; NET.hostId = m.hostId; NET.phase = m.phase; renderLobby(); break;
+    case 'host': {
+      const was = NET.isHost; NET.hostId = m.hostId; NET.isHost = NET.on && m.hostId === NET.id;
+      if (NET.isHost && !was) { promoteBots(); toast('방장이 되었습니다 — 봇 계산을 이어받습니다'); }
+      renderLobby(); break;
+    }
+    case 'start': startMatch(m); break;
+    case 'state': if (NET.on && m.id !== NET.id) getRemote(m.id, NET.names.get(m.id), true).push(m); break;
+    case 'bots': if (NET.on && !NET.isHost) for (const s of m.b) getRemote(s.id, s.n, false).push(s); break;
+    case 'shot': {
+      if (!NET.on) return;
+      const a = actorById.get(m.s); if (!a || a === player) return;
+      const def = WEAPONS[m.w]; if (!def) return;
+      const o = new THREE.Vector3(...m.o);
+      a.rig.fire(); sound(def.snd, o);
+      for (const e of m.e) {
+        const end = new THREE.Vector3(e[0], e[1], e[2]);
+        tracer(_v3.copy(end).sub(o).normalize().multiplyScalar(0.3).add(o), end, def.id === 'dmr' ? 1.6 : 1);
+        if (e[3] === 1) puff(end, 0xa01818, 6, 2.5); else if (e[3] === 2) puff(end, 0xc9c0aa, 4, 2);
+      }
+      break;
+    }
+    case 'hp': {
+      if (!player) return;
+      const prev = player.hp; player.hp = m.hp; player.armor = m.armor;
+      if (m.hp < prev - 0.01) {
+        hud.hurt = m.zone ? Math.max(hud.hurt, 0.3) : 0.6; shake(m.zone ? 0.08 : 0.28);
+        const a = m.by && actorById.get(m.by);
+        if (a) { hud.dmgAng = Math.atan2(-(a.pos.x - player.pos.x), -(a.pos.z - player.pos.z)); hud.dmgT = 1; }
+        if (!m.zone) { healCancel(); player.rig.hit(Math.random() < 0.5 ? -1 : 1); }
+      }
+      break;
+    }
+    case 'botHit': {
+      if (!NET.isHost) return;
+      const b = actorById.get(m.target); if (!(b instanceof Bot)) return;
+      damage(b, m.dmg, actorById.get(m.by) || null, m.w, m.head);
+      break;
+    }
+    case 'kill': {
+      if (!NET.on) return;
+      NET.alive = m.alive;
+      const v = actorById.get(m.victim), by = m.by ? actorById.get(m.by) : null;
+      if (v) deathVisual(v, by);
+      if (m.by === NET.id && m.victim !== NET.id) { player.kills++; killBanner(m.victimName); }
+      feed(deathText(m.byName, m.w, m.victimName), m.by === NET.id || m.victim === NET.id);
+      if (m.pos) { const p = new THREE.Vector3(m.pos[0], 0, m.pos[2]); p.y = groundAt(p.x, p.z, (m.pos[1] ?? terrainH(p.x, p.z)) + 0.5); spawnCrate(p, 'drop', m.drop); }
+      if (m.victim === NET.id) onLocalDeath(m.rank);
+      break;
+    }
+    case 'crate': {
+      const c = crateById.get(m.id); if (!c) return;
+      removeCrate(c);
+      if (m.by === NET.id) rollLoot(c.kind);
+      break;
+    }
+    case 'end': {
+      if (!NET.on) return;
+      const win = m.winner === NET.id;
+      $('endtitle').textContent = win ? '최후의 생존자!' : m.winnerName ? `${m.winnerName} 승리` : '경기 종료 — 생존한 플레이어 없음';
+      $('endtitle').style.color = win ? 'var(--accent)' : 'var(--fg)';
+      $('endstats').innerHTML = `처치 순위<br>` + (m.board || []).map((r, i) => `${i + 1}. <b>${escapeHtml(r.name)}</b> — ${r.kills}킬`).join('<br>') + `<br><br>내 생존 시간 <b>${fmt(now)}</b>`;
+      $('spectate').classList.add('hidden');
+      if (win) banner('승리!');
+      state = 'end'; document.exitPointerLock(); drawSpeedLines(0); setWind(0);
+      setTimeout(() => { $('hud').classList.add('hidden'); $('end').classList.remove('hidden'); }, win ? 1800 : 300);
+      break;
+    }
+  }
+}
+function netTick(dt) {
+  NET.sendT -= dt;
+  if (NET.sendT <= 0) { NET.sendT = 1 / 15; NET.send({ t: 'state', ...packState(player) }); }
+  if (NET.isHost) {
+    NET.botT -= dt;
+    if (NET.botT <= 0) { NET.botT = 0.1; NET.send({ t: 'bots', b: bots.filter(b => !b.dead || !b.sentDead).map(b => { if (b.dead) b.sentDead = true; return { ...packState(b), n: b.name, hp: Math.round(b.hp) }; }) }); }
+  }
+}
+
+canvas.addEventListener('click', () => { if (state === 'play' && document.pointerLockElement !== canvas) canvas.requestPointerLock(); });
+$('resume').addEventListener('click', () => canvas.requestPointerLock());
+$('pause').addEventListener('click', e => { if (e.target.tagName !== 'INPUT') canvas.requestPointerLock(); });
+document.addEventListener('pointerlockchange', () => {
+  const locked = document.pointerLockElement === canvas;
+  $('pause').classList.toggle('hidden', locked || state !== 'play' || (player && player.dead));
+  $('pausenote').textContent = NET.on ? '멀티 경기 중에는 게임이 멈추지 않습니다!' : '';
+  if (!locked) { firing = false; aiming = false; for (const k in keys) keys[k] = false; }
+});
+for (const id of ['sens', 'sens2']) $(id).addEventListener('input', e => { sens = +e.target.value; $('sens').value = $('sens2').value = sens; });
+addEventListener('mousemove', e => { if (document.pointerLockElement === canvas) { mouseDX += e.movementX; mouseDY += e.movementY; } });
+addEventListener('mousedown', e => {
+  if (document.pointerLockElement !== canvas || state !== 'play') return;
+  if (e.button === 0) { firing = true; if (player.healT > 0) healCancel(); }
+  if (e.button === 2) aiming = true;
+});
+addEventListener('mouseup', e => { if (e.button === 0) firing = false; if (e.button === 2) aiming = false; });
+addEventListener('contextmenu', e => e.preventDefault());
+let wheelT = 0;
+addEventListener('wheel', () => {
+  if (state !== 'play' || !player || performance.now() - wheelT < 250) return;
+  wheelT = performance.now(); switchTo(player.cur === 0 ? 1 : 0);
+});
+addEventListener('keydown', e => {
+  if (state !== 'play' || !player || player.dead) return;
+  if (e.repeat && e.code !== 'KeyW') { if (['Space', 'KeyC'].includes(e.code)) e.preventDefault(); return; }
+  keys[e.code] = true;
+  if (e.code === 'KeyR') tryReload();
+  if (e.code === 'Digit1') switchTo(0);
+  if (e.code === 'Digit2') switchTo(1);
+  if (e.code === 'KeyC') player.wantSlide = true;
+  if (e.code === 'KeyE' && player.nearCrate && !player.dropping) requestCrate(player.nearCrate);
+  if (e.code === 'KeyQ' && player.meds > 0 && player.healT <= 0 && player.hp < 100 && !player.dropping) { player.healT = 3; player.reloadT = 0; }
+  if (e.code === 'KeyM') $('bigmap').classList.toggle('hidden');
+  if (e.code === 'Space') e.preventDefault();
+});
+addEventListener('keyup', e => { keys[e.code] = false; });
+
+const pickCv = $('pickmap');
+pickCv.addEventListener('click', e => {
+  const r = pickCv.getBoundingClientRect();
+  const x = ((e.clientX - r.left) / r.width) * 1700 - 850, z = ((e.clientY - r.top) / r.height) * 1700 - 850;
+  if (terrainH(x, z) < 0.5) { landing = null; drawMap(pickCv, 0, 0, 1700); return; }
+  landing = new THREE.Vector3(x, 0, z); drawMap(pickCv, 0, 0, 1700, { mark: landing });
+});
+$('go').addEventListener('click', startGame);
+$('join').addEventListener('click', connectNet);
+$('mstart').addEventListener('click', () => NET.send({ t: 'start', bots: +$('botn').value }));
+$('botn').addEventListener('input', e => { e.target.dataset.touched = 1; $('botnv').textContent = e.target.value; });
+$('spectate').addEventListener('click', () => { $('end').classList.add('hidden'); });
+$('again').addEventListener('click', () => { try { sessionStorage.setItem('gh_rejoin', NET.connected || NET.on ? '1' : ''); } catch {} location.reload(); });
+$('pname').value = store.get('gh_name') || '';
+
+// ───────────────────────────────────────────── main loop
+const clock = new THREE.Clock();
+// ?test : run without pointer lock and expose internals for automated checks
+const TEST = new URLSearchParams(location.search).has('test');
+if (TEST) window.__g = { NET, actorById, get player() { return player; }, bots, zone, crates, actors, keys, terrainH, groundAt, setFiring: v => (firing = v), setAiming: v => (aiming = v), get state() { return state; }, startGame, camera };
+function loop() {
+  requestAnimationFrame(loop);
+  const dt = Math.min(clock.getDelta(), 0.05);
+  const running = (state === 'play' && (NET.on || TEST || document.pointerLockElement === canvas)) || state === 'ending';
+  if (state === 'play' || state === 'ending') {
+    if (running) {
+      now = NET.on ? (performance.now() - matchStart) / 1000 : now + dt;
+      updatePlayer(dt);
+      for (const b of bots) b.update(dt);
+      for (const a of actors) if (a instanceof RemoteActor) a.update(dt);
+      if (NET.on && state === 'play') netTick(dt);
+      updateZone(dt);
+      updateHUD(dt);
+      if (state === 'ending') { endT -= dt; if (endT <= 0) { state = 'end'; document.exitPointerLock(); $('hud').classList.add('hidden'); $('end').classList.remove('hidden'); drawSpeedLines(0); setWind(0); } }
+    }
+    updateCamera(dt);
+    updateFx(running ? dt : 0);
+  } else if (state === 'start' || state === 'end') {
+    const t = performance.now() * 0.00004;
+    camera.position.set(Math.cos(t) * 700, 380, Math.sin(t) * 700); camera.lookAt(0, 20, 0);
+    sun.position.set(0, 0, 0).addScaledVector(SUN_DIR, 400); sun.target.position.set(0, 0, 0);
+    sky.position.copy(camera.position);
+  }
+  renderer.render(scene, camera);
+}
+
+// ───────────────────────────────────────────── boot
+(async function boot() {
+  const sizes = { 'assets/world.json': 0.55e6, 'assets/terrain.glb': 1.37e6, 'assets/static.glb': 1.95e6, 'assets/props.glb': 3.55e6 };
+  const got = {}; const total = Object.values(sizes).reduce((a, b) => a + b, 0);
+  const prog = (u, n) => { got[u] = n; const f = Object.values(got).reduce((a, b) => a + b, 0) / total; $('loadbar').firstElementChild.style.width = Math.min(100, f * 100) + '%'; };
+  try {
+    const [wbuf, tbuf, sbuf, pbuf] = await Promise.all(Object.keys(sizes).map(u => fetchBuf(u, prog)));
+    const world = JSON.parse(new TextDecoder().decode(wbuf));
+    $('loadtxt').textContent = '섬을 조립하는 중…';
+    initWorld(world);
+    const [tg, sg, pg] = await Promise.all([parseGLB(tbuf), parseGLB(sbuf), parseGLB(pbuf)]);
+    setupTerrain(tg); setupStatic(sg); setupProps(pg, world.props);
+    buildBaseMap(); drawMap(pickCv, 0, 0, 1700);
+    $('loading').classList.add('hidden'); $('start').classList.remove('hidden');
+    state = 'start';
+    let rejoin = ''; try { rejoin = sessionStorage.getItem('gh_rejoin'); sessionStorage.removeItem('gh_rejoin'); } catch {}
+    if (rejoin) connectNet();
+  } catch (err) {
+    console.error(err);
+    $('loadtxt').innerHTML = `불러오기 실패: ${err.message}<br><small>index.html을 파일로 직접 열면 안 됩니다. 폴더의 <b>start_game.bat</b>(로컬 서버)로 실행하세요.</small>`;
+  }
+  loop();
+})();

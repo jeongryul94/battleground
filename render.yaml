@@ -1,0 +1,9 @@
+# Render.com blueprint: New > Blueprint > pick this repository
+services:
+  - type: web
+    name: greyhaven-survival
+    runtime: node
+    plan: free
+    buildCommand: "echo no build step"
+    startCommand: node serve.js
+    healthCheckPath: /
