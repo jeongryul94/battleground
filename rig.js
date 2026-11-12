@@ -38,56 +38,127 @@ const flashTex = (() => {
 })();
 const flashMat = new THREE.SpriteMaterial({ map: flashTex, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true });
 
-// ───────────────────────── weapons
+// ───────────────────────── weapons (chunky cartoon guns, rarity-coloured accents)
+export const RARITY_COLORS = ['#b8bcc4', '#5bd15b', '#4aa3ff', '#b65cff', '#ffb52e'];
 export const HOLD = {
-  pistol: [0.05, -0.02, -0.44], smg: [0.11, -0.07, -0.3], rifle: [0.11, -0.07, -0.27],
-  shotgun: [0.11, -0.07, -0.27], dmr: [0.11, -0.07, -0.26],
+  pistol: [0.05, -0.02, -0.44], revolver: [0.05, -0.02, -0.44],
+  smg: [0.11, -0.07, -0.3], tsmg: [0.11, -0.07, -0.3],
+  rifle: [0.11, -0.07, -0.27], burst: [0.11, -0.07, -0.27], lmg: [0.12, -0.09, -0.24],
+  shotgun: [0.11, -0.07, -0.27], tac: [0.11, -0.07, -0.27],
+  dmr: [0.11, -0.07, -0.26], sniper: [0.11, -0.07, -0.25], rocket: [0.13, 0.02, -0.12],
 };
-export function makeGun(id) {
+export function makeGun(id, rarity = 0) {
   const g = new THREE.Group();
-  const metal = M('#1f2224', 0.42, 0.65), poly = M('#2f3336', 0.7), wood = M('#6e4527', 0.75), tan = M('#8c7b58', 0.8), dark = M('#111314', 0.4, 0.5);
-  const box = (w, h, d, x, y, z, m = metal, rx = 0) => mesh(g, G.rbox(w, h, d, Math.min(w, h, d) * 0.3), m, x, y, z, rx);
-  const tube = (r, len, x, y, z, m = metal) => mesh(g, G.cyl(r, r, len, 10), m, x, y, z, Math.PI / 2);
+  const body = M('#3b414d', 0.5, 0.25), dark = M('#22262d', 0.4, 0.4), mid = M('#5d6573', 0.55, 0.2);
+  const wood = M('#a8683a', 0.7), tan = M('#c9a46a', 0.75), olive = M('#5d7a46', 0.7), red = M('#d9483b', 0.6);
+  const rar = M(RARITY_COLORS[rarity] || RARITY_COLORS[0], 0.35, 0.15);
+  const box = (w, h, d, x, y, z, m = body, rx = 0) => mesh(g, G.rbox(w, h, d, Math.min(w, h, d) * 0.32), m, x, y, z, rx);
+  const tube = (r, len, x, y, z, m = dark) => mesh(g, G.cyl(r, r, len, 12), m, x, y, z, Math.PI / 2);
   const anchor = (x, y, z) => { const o = new THREE.Object3D(); o.position.set(x, y, z); g.add(o); return o; };
   let u;
   switch (id) {
     case 'pistol':
-      box(0.036, 0.05, 0.2, 0, 0.055, -0.07); box(0.032, 0.035, 0.17, 0, 0.022, -0.06, poly);
-      box(0.032, 0.11, 0.05, 0, -0.03, 0.0, poly, 0.25); tube(0.008, 0.03, 0, 0.056, -0.18, dark);
-      u = { r: anchor(0, -0.03, 0.01), l: anchor(-0.03, -0.04, -0.01), muzzle: anchor(0, 0.056, -0.2), mag: anchor(0, -0.1, 0.02) };
+      box(0.04, 0.055, 0.21, 0, 0.055, -0.07, mid); box(0.036, 0.04, 0.18, 0, 0.022, -0.06);
+      box(0.036, 0.12, 0.055, 0, -0.035, 0.0, rar, 0.25); tube(0.01, 0.03, 0, 0.056, -0.19);
+      u = { r: anchor(0, -0.03, 0.01), l: anchor(-0.03, -0.04, -0.01), muzzle: anchor(0, 0.056, -0.21), mag: anchor(0, -0.1, 0.02) };
+      break;
+    case 'revolver':
+      tube(0.016, 0.24, 0, 0.06, -0.15); box(0.05, 0.05, 0.1, 0, 0.05, -0.02, mid);
+      mesh(g, G.cyl(0.035, 0.035, 0.07, 8), rar, 0, 0.045, -0.035, Math.PI / 2);
+      box(0.038, 0.12, 0.05, 0, -0.03, 0.04, wood, 0.35); box(0.02, 0.03, 0.04, 0, 0.09, -0.24, dark);
+      u = { r: anchor(0, -0.04, 0.05), l: anchor(-0.03, -0.05, 0.03), muzzle: anchor(0, 0.06, -0.28), mag: anchor(0, 0.04, -0.03) };
       break;
     case 'smg':
-      box(0.05, 0.08, 0.3, 0, 0.04, -0.08); box(0.034, 0.18, 0.045, 0, -0.09, -0.13, poly, -0.12);
-      box(0.032, 0.1, 0.045, 0, -0.04, 0.03, poly, 0.25); tube(0.014, 0.14, 0, 0.05, -0.29, dark);
-      box(0.018, 0.04, 0.2, 0, 0.03, 0.15, poly); box(0.04, 0.08, 0.02, 0, 0.02, 0.25, poly);
-      box(0.025, 0.03, 0.06, 0, 0.1, -0.06, dark);
+      box(0.055, 0.085, 0.3, 0, 0.04, -0.08); box(0.036, 0.19, 0.05, 0, -0.09, -0.13, rar, -0.12);
+      box(0.034, 0.1, 0.05, 0, -0.04, 0.03, dark, 0.25); tube(0.016, 0.14, 0, 0.05, -0.29);
+      box(0.02, 0.045, 0.2, 0, 0.03, 0.15, dark); box(0.045, 0.085, 0.025, 0, 0.02, 0.25, dark);
       u = { r: anchor(0, -0.05, 0.04), l: anchor(0, -0.03, -0.2), muzzle: anchor(0, 0.05, -0.37), mag: anchor(0, -0.18, -0.14) };
       break;
+    case 'tsmg':
+      box(0.06, 0.1, 0.26, 0, 0.04, -0.06, mid); box(0.05, 0.05, 0.16, 0, 0.07, -0.24); box(0.04, 0.16, 0.06, 0, -0.08, -0.06, rar, -0.3);
+      box(0.034, 0.1, 0.05, 0, -0.03, 0.06, dark, 0.25); box(0.03, 0.05, 0.12, 0, 0.13, -0.06, dark); tube(0.014, 0.08, 0, 0.07, -0.34);
+      u = { r: anchor(0, -0.05, 0.07), l: anchor(0, 0.02, -0.24), muzzle: anchor(0, 0.07, -0.39), mag: anchor(0, -0.16, -0.08) };
+      break;
     case 'rifle':
-      box(0.05, 0.085, 0.4, 0, 0.04, -0.1); box(0.058, 0.068, 0.24, 0, 0.035, -0.38, poly);
-      tube(0.012, 0.22, 0, 0.045, -0.6, dark); tube(0.02, 0.05, 0, 0.045, -0.72, dark);
-      box(0.034, 0.17, 0.06, 0, -0.09, -0.15, poly, 0.3); box(0.032, 0.11, 0.045, 0, -0.05, 0.05, poly, 0.3);
-      box(0.045, 0.1, 0.22, 0, 0.02, 0.22, poly); box(0.03, 0.035, 0.1, 0, 0.1, -0.08, dark);
-      box(0.02, 0.06, 0.02, 0, 0.1, -0.46, dark);
-      u = { r: anchor(0, -0.07, 0.06), l: anchor(0, -0.02, -0.4), muzzle: anchor(0, 0.045, -0.76), mag: anchor(0, -0.19, -0.18) };
+      box(0.055, 0.09, 0.42, 0, 0.04, -0.1); box(0.062, 0.072, 0.25, 0, 0.035, -0.38, olive);
+      tube(0.013, 0.22, 0, 0.045, -0.6); tube(0.024, 0.06, 0, 0.045, -0.72);
+      box(0.038, 0.18, 0.065, 0, -0.09, -0.15, rar, 0.3); box(0.034, 0.11, 0.05, 0, -0.05, 0.05, dark, 0.3);
+      box(0.05, 0.105, 0.23, 0, 0.02, 0.22, olive); box(0.034, 0.04, 0.11, 0, 0.11, -0.08, dark);
+      u = { r: anchor(0, -0.07, 0.06), l: anchor(0, -0.02, -0.4), muzzle: anchor(0, 0.045, -0.77), mag: anchor(0, -0.19, -0.18) };
+      break;
+    case 'burst':
+      box(0.065, 0.1, 0.5, 0, 0.04, -0.12, mid); box(0.07, 0.06, 0.2, 0, 0.1, -0.12, rar);
+      tube(0.015, 0.16, 0, 0.04, -0.45); box(0.04, 0.14, 0.06, 0, -0.07, 0.0, dark, 0.15);
+      box(0.034, 0.1, 0.05, 0, -0.06, 0.1, dark, 0.3); box(0.055, 0.1, 0.18, 0, 0.03, 0.24, body);
+      u = { r: anchor(0, -0.06, 0.1), l: anchor(0, -0.01, -0.3), muzzle: anchor(0, 0.04, -0.54), mag: anchor(0, -0.15, 0.0) };
+      break;
+    case 'lmg':
+      box(0.08, 0.12, 0.46, 0, 0.04, -0.08); tube(0.02, 0.4, 0, 0.05, -0.5); tube(0.03, 0.06, 0, 0.05, -0.72);
+      mesh(g, G.cyl(0.07, 0.07, 0.08, 16), rar, 0.0, -0.08, -0.08, 0, 0, Math.PI / 2);
+      box(0.04, 0.11, 0.05, 0, -0.05, 0.08, dark, 0.3); box(0.06, 0.12, 0.24, 0, 0.02, 0.26, olive);
+      box(0.012, 0.16, 0.012, 0.03, -0.06, -0.62, dark, 0.4); box(0.012, 0.16, 0.012, -0.03, -0.06, -0.62, dark, 0.4);
+      u = { r: anchor(0, -0.06, 0.1), l: anchor(0, -0.0, -0.36), muzzle: anchor(0, 0.05, -0.76), mag: anchor(0, -0.12, -0.08) };
       break;
     case 'shotgun':
-      tube(0.021, 0.62, 0, 0.065, -0.36, dark); tube(0.017, 0.46, 0, 0.03, -0.3);
-      box(0.064, 0.064, 0.16, 0, 0.03, -0.4, wood); box(0.054, 0.095, 0.22, 0, 0.05, 0.0);
-      box(0.046, 0.12, 0.28, 0, 0.0, 0.24, wood, 0.12); box(0.032, 0.1, 0.045, 0, -0.04, 0.07, wood, 0.3);
-      u = { r: anchor(0, -0.06, 0.08), l: anchor(0, 0.0, -0.4), muzzle: anchor(0, 0.065, -0.68), mag: anchor(0, -0.02, -0.1) };
+      tube(0.024, 0.64, 0, 0.065, -0.36); tube(0.018, 0.46, 0, 0.028, -0.3, mid);
+      box(0.07, 0.07, 0.17, 0, 0.03, -0.42, rar); box(0.06, 0.1, 0.22, 0, 0.05, 0.0);
+      box(0.052, 0.13, 0.3, 0, 0.0, 0.25, wood, 0.12); box(0.036, 0.1, 0.05, 0, -0.04, 0.08, wood, 0.3);
+      u = { r: anchor(0, -0.06, 0.08), l: anchor(0, 0.0, -0.42), muzzle: anchor(0, 0.065, -0.69), mag: anchor(0, -0.02, -0.1) };
+      break;
+    case 'tac':
+      box(0.07, 0.11, 0.42, 0, 0.04, -0.1, mid); tube(0.026, 0.3, 0, 0.06, -0.42);
+      box(0.05, 0.16, 0.08, 0, -0.08, -0.12, rar, 0.1); box(0.036, 0.1, 0.05, 0, -0.05, 0.07, dark, 0.3);
+      box(0.06, 0.1, 0.2, 0, 0.02, 0.22, body); box(0.08, 0.03, 0.2, 0, 0.11, -0.12, dark);
+      u = { r: anchor(0, -0.06, 0.08), l: anchor(0, 0.0, -0.32), muzzle: anchor(0, 0.06, -0.58), mag: anchor(0, -0.16, -0.12) };
       break;
     case 'dmr':
-      box(0.05, 0.085, 0.46, 0, 0.04, -0.09); tube(0.013, 0.46, 0, 0.045, -0.54, dark); tube(0.022, 0.06, 0, 0.045, -0.78, dark);
-      tube(0.03, 0.28, 0, 0.135, -0.07, poly); tube(0.036, 0.04, 0, 0.135, -0.22, poly); tube(0.034, 0.04, 0, 0.135, 0.08, poly);
-      box(0.02, 0.06, 0.03, 0, 0.09, -0.14, dark); box(0.02, 0.06, 0.03, 0, 0.09, 0.02, dark);
-      box(0.036, 0.1, 0.075, 0, -0.05, -0.13, poly); box(0.032, 0.11, 0.045, 0, -0.05, 0.06, poly, 0.3);
-      box(0.05, 0.115, 0.27, 0, 0.01, 0.25, tan);
-      u = { r: anchor(0, -0.07, 0.07), l: anchor(0, -0.02, -0.36), muzzle: anchor(0, 0.045, -0.82), mag: anchor(0, -0.12, -0.13) };
+      box(0.055, 0.09, 0.48, 0, 0.04, -0.09, tan); tube(0.014, 0.46, 0, 0.045, -0.55); tube(0.024, 0.06, 0, 0.045, -0.79);
+      tube(0.032, 0.28, 0, 0.14, -0.07, dark); tube(0.04, 0.05, 0, 0.14, -0.22, rar); tube(0.038, 0.05, 0, 0.14, 0.08, dark);
+      box(0.038, 0.11, 0.08, 0, -0.05, -0.13, dark); box(0.034, 0.11, 0.05, 0, -0.05, 0.06, dark, 0.3); box(0.055, 0.12, 0.28, 0, 0.01, 0.25, tan);
+      u = { r: anchor(0, -0.07, 0.07), l: anchor(0, -0.02, -0.36), muzzle: anchor(0, 0.045, -0.83), mag: anchor(0, -0.12, -0.13) };
       break;
+    case 'sniper':
+      box(0.06, 0.09, 0.42, 0, 0.04, -0.05, olive); tube(0.016, 0.66, 0, 0.05, -0.6); tube(0.03, 0.08, 0, 0.05, -0.95);
+      tube(0.04, 0.34, 0, 0.15, -0.05, dark); tube(0.05, 0.06, 0, 0.15, -0.24, rar); tube(0.048, 0.06, 0, 0.15, 0.13, dark);
+      box(0.012, 0.05, 0.03, 0.05, 0.07, 0.06, mid); box(0.034, 0.11, 0.05, 0, -0.05, 0.08, dark, 0.3); box(0.06, 0.13, 0.3, 0, 0.0, 0.3, olive);
+      u = { r: anchor(0, -0.07, 0.09), l: anchor(0, -0.02, -0.32), muzzle: anchor(0, 0.05, -1.0), mag: anchor(0, -0.08, -0.1) };
+      break;
+    case 'rocket':
+      mesh(g, G.cyl(0.075, 0.075, 0.9, 14), olive, 0, 0.04, -0.15, Math.PI / 2);
+      mesh(g, G.cyl(0.09, 0.075, 0.1, 14), rar, 0, 0.04, -0.62, Math.PI / 2);
+      mesh(g, G.cyl(0.085, 0.085, 0.08, 14), dark, 0, 0.04, 0.32, Math.PI / 2);
+      box(0.04, 0.12, 0.05, 0, -0.07, -0.05, dark, 0.2); box(0.04, 0.1, 0.05, 0, -0.06, -0.3, dark, 0.2);
+      box(0.03, 0.05, 0.12, 0.08, 0.1, -0.15, dark); mesh(g, G.sph(0.06), red, 0, 0.04, -0.66);
+      u = { r: anchor(0, -0.1, -0.03), l: anchor(0, -0.09, -0.3), muzzle: anchor(0, 0.04, -0.72), mag: anchor(0, 0.04, 0.38) };
+      break;
+    default: return makeGun('pistol', rarity);
   }
   g.userData = u;
   return g;
+}
+
+// side-view icon (data URL) for the HUD, rendered once per weapon+rarity
+let iconRenderer = null, iconScene, iconCam;
+const iconCache = {};
+export function gunIcon(id, rarity = 0) {
+  const key = id + ':' + rarity;
+  if (iconCache[key]) return iconCache[key];
+  if (!iconRenderer) {
+    const c = document.createElement('canvas'); c.width = 256; c.height = 128;
+    iconRenderer = new THREE.WebGLRenderer({ canvas: c, alpha: true, antialias: true, preserveDrawingBuffer: true });
+    iconRenderer.setClearColor(0x000000, 0); iconRenderer.outputColorSpace = THREE.SRGBColorSpace;
+    iconScene = new THREE.Scene();
+    iconScene.add(new THREE.HemisphereLight(0xffffff, 0x445566, 2.2));
+    const d = new THREE.DirectionalLight(0xffffff, 2.2); d.position.set(2, 3, 2); iconScene.add(d);
+    iconCam = new THREE.OrthographicCamera(-0.62, 0.62, 0.31, -0.31, 0.01, 10);
+    iconCam.position.set(3, 0.4, 0); iconCam.lookAt(0, 0, 0);
+  }
+  const gun = makeGun(id, rarity);
+  const box = new THREE.Box3().setFromObject(gun), size = box.getSize(new THREE.Vector3()), ctr = box.getCenter(new THREE.Vector3());
+  const s = 1.1 / Math.max(size.z, size.y * 2);
+  gun.scale.setScalar(s); gun.position.copy(ctr).multiplyScalar(-s);
+  iconScene.add(gun); iconRenderer.render(iconScene, iconCam); iconScene.remove(gun);
+  return (iconCache[key] = iconRenderer.domElement.toDataURL());
 }
 
 // ───────────────────────── two-bone IK
@@ -178,10 +249,10 @@ export class Rig {
     this.dead = false; this.weaponId = null;
     this.onStep = null;
   }
-  setWeapon(id) {
-    if (this.weaponId === id) return;
+  setWeapon(id, rarity = 0) {
+    if (this.weaponId === id && this.weaponRarity === rarity) return;
     if (this.gun) this.holder.remove(this.gun);
-    this.gun = makeGun(id); this.holder.add(this.gun); this.weaponId = id;
+    this.gun = makeGun(id, rarity); this.holder.add(this.gun); this.weaponId = id; this.weaponRarity = rarity;
     this.gun.userData.muzzle.add(this.flash);
     const h = HOLD[id]; this.holdPos = new THREE.Vector3(h[0], h[1], h[2]);
     this.holder.position.copy(this.holdPos);
