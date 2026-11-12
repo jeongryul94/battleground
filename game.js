@@ -1602,7 +1602,7 @@ function updateHUD(dt) {
 }
 
 // ───────────────────────────────────────────── game flow
-let state = 'loading', landing = null, endT = 0, matchStart = 0;
+let state = 'loading', landing = null, endT = 0, matchStart = 0, matchTotal = 20;
 function spawnBots(n, spawn) {
   for (let i = 0; i < n; i++) {
     const b = new Bot(BOT_NAMES[i % BOT_NAMES.length] + (i >= BOT_NAMES.length ? ' ' + (i + 1) : ''), 'b' + i);
@@ -1626,7 +1626,8 @@ function startGame() {
   zplan = zonePlan(seed, terrainH); placeCrates(seed);
   const spawn = pickSpawn();
   createPlayer(spawn);
-  spawnBots(19, spawn);
+  const nb = clamp(+$('spbots').value || 19, 1, 59);
+  spawnBots(nb, spawn); matchTotal = nb + 1;
   now = 0; beginPlay();
 }
 function endGame(win) {
@@ -1635,7 +1636,7 @@ function endGame(win) {
   const rank = win ? 1 : aliveCount() + 1;
   $('endtitle').textContent = win ? '최후의 생존자!' : '사망';
   $('endtitle').style.color = win ? 'var(--accent)' : 'var(--bad)';
-  $('endstats').innerHTML = `순위 <b>#${rank}</b> / 20<br>처치 <b>${player.kills}</b><br>생존 시간 <b>${fmt(now)}</b>`;
+  $('endstats').innerHTML = `순위 <b>#${rank}</b> / ${matchTotal}<br>처치 <b>${player.kills}</b><br>생존 시간 <b>${fmt(now)}</b>`;
   if (win) banner('승리!');
 }
 
@@ -1656,7 +1657,9 @@ function connectNet() {
   ws.onopen = () => NET.send({ t: 'hello', name: myName() });
   ws.onmessage = e => { let m; try { m = JSON.parse(e.data); } catch { return; } onNet(m); };
   ws.onclose = () => {
-    NET.connected = false; NET.ws = null; renderLobby();
+    NET.connected = false; NET.ws = null;
+    if (NET.leaving) { NET.leaving = false; $('lobby').classList.add('hidden'); return; }
+    renderLobby();
     if (NET.on && state === 'play') banner('서버 연결이 끊겼습니다');
   };
 }
@@ -1672,13 +1675,13 @@ function renderLobby() {
   const amHost = NET.id === NET.hostId;
   $('hostctl').classList.toggle('hidden', !amHost || NET.phase !== 'lobby');
   $('waitmsg').textContent = NET.phase === 'match' ? '경기가 진행 중입니다. 끝나면 다음 경기에 참가할 수 있습니다.' : amHost ? '' : '방장이 경기를 시작하기를 기다리는 중…';
-  if (amHost && !$('botn').dataset.touched) { const v = Math.max(0, 20 - NET.lobby.length); $('botn').value = v; $('botnv').textContent = v; }
+  if (amHost && !$('botn').dataset.touched) { const v = Math.max(0, (+store.get('gh_bots') || 20) - NET.lobby.length); $('botn').value = v; $('botnv').textContent = v; }
 }
 const escapeHtml = s => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 function getRemote(id, name, human) { return actorById.get(id) || new RemoteActor(id, name || id, human); }
 function startMatch(m) {
   if (state === 'play' || state === 'ending') return;
-  NET.on = true; NET.hostId = m.hostId; NET.isHost = m.hostId === NET.id; NET.alive = m.players.length + m.bots;
+  NET.on = true; NET.hostId = m.hostId; NET.isHost = m.hostId === NET.id; NET.alive = m.players.length + m.bots; matchTotal = NET.alive;
   NET.names = new Map(m.players.map(p => [p.id, p.name]));
   initAudio();
   zplan = m.plan; placeCrates(m.seed);
@@ -1705,7 +1708,7 @@ function onLocalDeath(rank) {
   deathVisual(player, null);
   document.exitPointerLock();
   $('endtitle').textContent = '사망'; $('endtitle').style.color = 'var(--bad)';
-  $('endstats').innerHTML = `순위 <b>#${rank}</b><br>처치 <b>${player.kills}</b><br>생존 시간 <b>${fmt(now)}</b><br><small>경기는 계속 진행 중입니다</small>`;
+  $('endstats').innerHTML = `순위 <b>#${rank}</b> / ${matchTotal}<br>처치 <b>${player.kills}</b><br>생존 시간 <b>${fmt(now)}</b><br><small>경기는 계속 진행 중입니다</small>`;
   $('spectate').classList.remove('hidden');
   setTimeout(() => $('end').classList.remove('hidden'), 1500);
 }
@@ -1849,9 +1852,26 @@ pickCv.addEventListener('click', e => {
   landing = new THREE.Vector3(x, 0, z); drawMap(pickCv, 0, 0, 1700, { mark: landing });
 });
 $('go').addEventListener('click', startGame);
+// headcount sliders remember their value
+for (const [id, key, def] of [['spbots', 'gh_spbots', 19], ['botn', 'gh_bots', 19]]) {
+  const el = $(id), out = $(id + 'v'), saved = +store.get(key);
+  if (saved && !Number.isNaN(saved)) { el.value = saved; if (id === 'botn') el.dataset.touched = 1; }
+  out.textContent = el.value;
+  el.addEventListener('input', () => { out.textContent = el.value; store.set(key, el.value); });
+}
+$('leavelobby').addEventListener('click', () => { if (NET.ws) { NET.leaving = true; NET.ws.close(); } else $('lobby').classList.add('hidden'); });
+// two-step confirm so a stray click does not end the match
+let quitArm = 0;
+$('quit').addEventListener('click', e => {
+  e.stopPropagation();
+  if (performance.now() - quitArm > 3000) { quitArm = performance.now(); $('quit').textContent = '한 번 더 누르면 나갑니다'; setTimeout(() => ($('quit').textContent = '경기 나가기'), 3000); return; }
+  try { sessionStorage.setItem('gh_rejoin', NET.on || NET.connected ? '1' : ''); } catch {}
+  if (NET.ws) NET.ws.close();
+  location.reload();
+});
 $('join').addEventListener('click', connectNet);
 $('mstart').addEventListener('click', () => NET.send({ t: 'start', bots: +$('botn').value }));
-$('botn').addEventListener('input', e => { e.target.dataset.touched = 1; $('botnv').textContent = e.target.value; });
+$('botn').addEventListener('input', e => { e.target.dataset.touched = 1; });
 $('spectate').addEventListener('click', () => { $('end').classList.add('hidden'); });
 $('again').addEventListener('click', () => { try { sessionStorage.setItem('gh_rejoin', NET.connected || NET.on ? '1' : ''); } catch {} location.reload(); });
 $('pname').value = store.get('gh_name') || '';

@@ -108,7 +108,7 @@ function handle(p, m) {
     case 'start': {
       if (p.id !== hostId || phase !== 'lobby' || !Z) return;
       const seed = (Math.random() * 2 ** 31) | 0;
-      const bots = Math.max(0, Math.min(40, m.bots | 0));
+      const bots = Math.max(0, Math.min(59, m.bots | 0));
       match = { seed, plan: Z.zonePlan(seed, terrainH), startAt: Date.now(), bots, botsAlive: bots, opened: new Set(), dropN: 0 };
       phase = 'match';
       for (const q of players.values()) Object.assign(q, { inMatch: true, alive: true, hp: 100, gear: { vest: null, helm: null }, kills: 0 });
