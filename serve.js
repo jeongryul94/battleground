@@ -88,6 +88,7 @@ function onConnect(conn) {
       if (!hostId || !players.has(hostId)) hostId = me.id;
       conn.send({ t: 'welcome', id: me.id, hostId, phase, ips: lanIPs(), port });
       sendLobby(); console.log(`+ ${name} (${me.id}) joined — ${players.size} online`);
+      broadcast({ t: 'chat', sys: true, text: `${name} 님이 들어왔습니다` });
       return;
     }
     handle(me, m);
@@ -98,6 +99,7 @@ function onConnect(conn) {
     if (match && me.inMatch && me.alive) { me.alive = false; announceKill({ victim: me.id, victimName: me.name, by: null, byName: null, w: '이탈', pos: me.pos }); }
     if (hostId === me.id) { hostId = players.size ? players.keys().next().value : null; broadcast({ t: 'host', hostId }); }
     broadcast({ t: 'left', id: me.id });
+    broadcast({ t: 'chat', sys: true, text: `${me.name} 님이 나갔습니다` });
     if (!players.size) endMatch(null, true);
     sendLobby();
   };
@@ -171,6 +173,12 @@ function handle(p, m) {
       break;
     }
     case 'heal': if (p.alive) { const cap = Math.min(100, +m.cap || 100); if (p.hp < cap) p.hp = Math.min(cap, p.hp + Math.min(100, +m.amt || 0)); p.conn.send({ t: 'hp', hp: p.hp, gear: p.gear }); } break;
+    case 'chat': {
+      const now = Date.now(); if (now - (p.lastChat || 0) < 600) return; p.lastChat = now;
+      const text = String(m.text || '').replace(/[\u0000-\u001f]/g, '').trim().slice(0, 120);
+      if (text) broadcast({ t: 'chat', id: p.id, name: p.name, text });
+      break;
+    }
     case 'selfdmg': if (p.alive) { p.hp -= Math.max(0, +m.amt || 0); p.conn.send({ t: 'hp', hp: p.hp, gear: p.gear }); if (p.hp <= 0) killPlayer(p, null, null, m.w || '낙하'); } break;
   }
 }

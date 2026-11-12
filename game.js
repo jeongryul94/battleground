@@ -741,6 +741,7 @@ function deathVisual(t, by) {
 }
 const deathText = (byName, wname, victim) => byName ? `${byName} <small>[${wname}]</small> ▸ ${victim}` : `${victim} — ${wname === '낙하' ? '낙하로' : wname === '이탈' ? '접속 종료로' : '자기장에서'} 사망`;
 function kill(t, by, wname) {
+  if (t === player && by) lastKiller = by;
   if (NET.on) {
     // host-owned bot died: report it, the server announces the kill to everyone
     if (t instanceof Bot && NET.isHost && !t.reported) {
@@ -753,10 +754,11 @@ function kill(t, by, wname) {
   deathVisual(t, by);
   if (by && by !== t) by.kills++;
   feed(deathText(by?.name, wname, t.name), by === player || t === player);
-  if (t === player) { endGame(false); return; }
+  if (t === player) { onLocalDeath(aliveCount() + 1); return; }
   placeBox('death', groundPos(t.pos, 0.2), botLoot(t));
   if (by === player) killBanner(t.name);
   if (aliveCount() === 1 && !player.dead) endGame(true);
+  else if (player.dead && aliveCount() === 1) { const w = actors.find(a => !a.dead); banner(`${w.name} 우승!`); feed(`<b>${escapeHtml(w.name)}</b> — 최후의 생존자`, false); }
 }
 function killBanner(name) { banner(`${name} 처치`); beep(700, 0.12, 0.1, 'sine'); setTimeout(() => beep(1050, 0.16, 0.1, 'sine'), 90); }
 const aliveCount = () => (NET.on ? NET.alive : actors.filter(a => !a.dead).length);
@@ -768,7 +770,7 @@ const ITEMS = {
   a12: { name: '12게이지 탄', type: 'ammo', color: '#e0684a' },
   a762: { name: '7.62mm 탄', type: 'ammo', color: '#5aa0e0' },
   rkt: { name: '로켓', type: 'ammo', color: '#d9483b' },
-  band: { name: '붕대', type: 'heal', amt: 15, cap: 75, time: 2.5, color: '#efe6d0' },
+  band: { name: '붕대', type: 'heal', amt: 15, cap: 100, time: 2.3, color: '#efe6d0' },
   med: { name: '구급상자', type: 'heal', amt: 100, cap: 100, time: 6, color: '#e05050' },
 };
 const GEAR_COLORS = ['', '#8a9474', '#5c7aa0', '#2f3a48'];
@@ -945,9 +947,11 @@ function useHeal(k) {
 }
 function quickHeal() {
   const p = player;
-  if (p.hp < 75 && p.inv.band > 0 && (p.hp > 45 || p.inv.med === 0)) return useHeal('band');
-  if (p.inv.med > 0 && p.hp < 100) return useHeal('med');
-  if (p.inv.band > 0 && p.hp < 75) return useHeal('band');
+  if (p.hp >= 100) { toast('체력이 가득 찼습니다'); return; }
+  // low health: medkit first; otherwise bandages (they chain until full)
+  if (p.hp < 40 && p.inv.med > 0) return useHeal('med');
+  if (p.inv.band > 0) return useHeal('band');
+  if (p.inv.med > 0) return useHeal('med');
   toast(p.hp >= 100 ? '체력이 가득 찼습니다' : '회복 아이템이 없습니다');
 }
 
@@ -1360,8 +1364,11 @@ function updatePlayer(dt) {
     p.healT -= dt;
     if (p.healT <= 0) {
       const d = ITEMS[p.healItem]; p.inv[p.healItem]--;
-      if (NET.on) NET.send({ t: 'heal', amt: d.amt, cap: d.cap }); else p.hp = Math.max(p.hp, Math.min(d.cap, p.hp + d.amt));
-      toast(d.name + ' 사용 완료'); beep(660, 0.12, 0.08, 'sine');
+      const after = Math.max(p.hp, Math.min(d.cap, p.hp + d.amt)); // predicted (the server confirms in multiplayer)
+      if (NET.on) NET.send({ t: 'heal', amt: d.amt, cap: d.cap }); else p.hp = after;
+      beep(660, 0.12, 0.08, 'sine');
+      if (p.healItem === 'band' && p.inv.band > 0 && after < 99.5) { p.healT = p.healTotal = d.time; toast(`붕대 연속 사용 중 · 남은 ${p.inv.band}개 (사격하면 멈춤)`); }
+      else toast(d.name + ' 사용 완료');
     }
   }
   const hsp = Math.hypot(p.vel.x, p.vel.z);
@@ -1456,7 +1463,54 @@ function updatePlayer(dt) {
 // ───────────────────────────────────────────── camera
 const cam = { pivot: new THREE.Vector3(), init: false, trauma: 0, fovKick: 0, roll: 0, back: 3.3 };
 function shake(a) { cam.trauma = Math.min(1, cam.trauma + a); }
+// ───────────────────────────────────────────── spectating
+let lastKiller = null;
+const spec = { on: false, target: null, deadT: 0, pos: new THREE.Vector3(), init: false };
+function specList() {
+  return actors.filter(a => a !== player && !a.dead && a.seen !== false)
+    .sort((a, b) => (b.remoteHuman ? 1 : 0) - (a.remoteHuman ? 1 : 0));
+}
+function specStart() {
+  spec.on = true; spec.init = false;
+  const L = specList();
+  spec.target = lastKiller && !lastKiller.dead && L.includes(lastKiller) ? lastKiller : L[0] || null;
+  $('end').classList.add('hidden'); $('hud').classList.remove('hidden'); $('hud').classList.add('spectating');
+  renderSpec();
+}
+function specStop() { spec.on = false; $('hud').classList.remove('spectating'); $('end').classList.remove('hidden'); }
+function specCycle(d) {
+  const L = specList(); if (!L.length) return;
+  const i = L.indexOf(spec.target);
+  spec.target = L[((i < 0 ? 0 : i + d) + L.length) % L.length]; spec.init = false; renderSpec();
+}
+function renderSpec() {
+  const t = spec.target;
+  $('specname').innerHTML = t ? `${escapeHtml(t.name)}${t.remoteHuman ? '' : ' <i>봇</i>'}` : '관전할 대상이 없습니다';
+  $('speccount').textContent = `남은 생존자 ${aliveCount()}명`;
+}
+function specCamera(dt) {
+  if (spec.target && spec.target.dead) { spec.deadT += dt; if (spec.deadT > 2.2) { spec.deadT = 0; specCycle(1); } }
+  const t = spec.target; if (!t) return;
+  const yaw = t.yaw, pitch = clamp((t.pitch || 0) * 0.6 - 0.12, -0.6, 0.5);
+  const fwd = _v1.set(-Math.sin(yaw) * Math.cos(pitch), Math.sin(pitch), -Math.cos(yaw) * Math.cos(pitch));
+  const right = _v2.set(Math.cos(yaw), 0, -Math.sin(yaw));
+  const pivot = _v3.set(t.pos.x, t.pos.y + 1.65, t.pos.z);
+  const want = pivot.clone().addScaledVector(fwd, -4.4).addScaledVector(right, 0.6); want.y += 0.4;
+  const dir = want.clone().sub(pivot), len = dir.length(); dir.divideScalar(len);
+  const h = raycast(pivot, dir, len, null, false);
+  want.copy(pivot).addScaledVector(dir, Math.max(0.4, Math.min(len, h.t - 0.25)));
+  if (!spec.init) { spec.pos.copy(want); spec.init = true; }
+  spec.pos.lerp(want, 1 - Math.exp(-10 * dt));
+  camera.position.copy(spec.pos);
+  camera.lookAt(pivot.clone().addScaledVector(fwd, 12));
+  camera.fov += (72 - camera.fov) * Math.min(1, 6 * dt); camera.updateProjectionMatrix();
+  sun.position.copy(t.pos).addScaledVector(SUN_DIR, 350); sun.target.position.copy(t.pos);
+  sky.position.copy(camera.position);
+  drawSpeedLines(0);
+  if (Math.random() < 0.05) renderSpec();
+}
 function updateCamera(dt) {
+  if (spec.on && player.dead) { specCamera(dt); return; }
   const p = player;
   const def = curW()?.def;
   const ads = aiming && !p.dropping && !p.dead;
@@ -1710,13 +1764,56 @@ function promoteBots() {
   }
 }
 function onLocalDeath(rank) {
+  if (player.deathShown) return; player.deathShown = true;
   deathVisual(player, null);
   document.exitPointerLock();
   $('endtitle').textContent = '사망'; $('endtitle').style.color = 'var(--bad)';
-  $('endstats').innerHTML = `순위 <b>#${rank}</b> / ${matchTotal}<br>처치 <b>${player.kills}</b><br>생존 시간 <b>${fmt(now)}</b><br><small>경기는 계속 진행 중입니다</small>`;
+  $('endstats').innerHTML = `순위 <b>#${rank}</b> / ${matchTotal}<br>처치 <b>${player.kills}</b><br>생존 시간 <b>${fmt(now)}</b><br><small>경기는 계속 진행 중입니다 · 관전하면서 끝까지 볼 수 있어요</small>`;
   $('spectate').classList.remove('hidden');
   setTimeout(() => $('end').classList.remove('hidden'), 1500);
 }
+// ───────────────────────────────────────────── chat
+let chatOpen = false;
+function addChat(m) {
+  const line = document.createElement('div');
+  if (m.sys) { line.className = 'sys'; line.textContent = m.text; }
+  else {
+    const col = String(m.id).startsWith('p') ? new THREE.Color(outfitFor(m.id).helmet).getStyle() : '#ffd23f';
+    line.innerHTML = `<b style="color:${col}">${escapeHtml(m.name)}</b> ${escapeHtml(m.text)}`;
+  }
+  for (const id of ['chatlog', 'lobbylog']) {
+    const box = $(id), el = line.cloneNode(true);
+    box.append(el); while (box.children.length > 40) box.firstChild.remove();
+    box.scrollTop = box.scrollHeight;
+    if (id === 'chatlog') setTimeout(() => el.classList.add('old'), 12000);
+  }
+  if (!m.sys && m.id !== NET.id) beep(990, 0.04, 0.03, 'sine');
+}
+function openChat() {
+  if (!NET.connected) { toast('채팅은 멀티 경기에서 쓸 수 있습니다'); return; }
+  chatOpen = true; for (const k in keys) keys[k] = false; firing = false;
+  $('chat').classList.add('open'); const i = $('chatin'); i.classList.remove('hidden'); i.value = ''; i.focus();
+}
+function closeChat() { chatOpen = false; $('chat').classList.remove('open'); const i = $('chatin'); i.blur(); i.classList.add('hidden'); }
+function sendChat(text) { text = text.trim().slice(0, 120); if (text) NET.send({ t: 'chat', text }); }
+$('chatin').addEventListener('keydown', e => {
+  e.stopPropagation();
+  if (e.key === 'Enter') { sendChat(e.target.value); closeChat(); }
+  else if (e.key === 'Escape') closeChat();
+});
+$('lobbyin').addEventListener('keydown', e => {
+  e.stopPropagation();
+  if (e.key === 'Enter') { sendChat(e.target.value); e.target.value = ''; }
+});
+// Enter opens chat in a match; arrows / buttons switch the spectated player
+addEventListener('keydown', e => {
+  if (chatOpen || document.activeElement?.tagName === 'INPUT') return;
+  if (e.code === 'Enter' && (state === 'play' || state === 'end') && NET.on) { e.preventDefault(); openChat(); }
+  if (spec.on && player?.dead) { if (e.code === 'ArrowRight' || e.code === 'KeyD') specCycle(1); if (e.code === 'ArrowLeft' || e.code === 'KeyA') specCycle(-1); }
+});
+$('specprev').addEventListener('click', () => specCycle(-1));
+$('specnext').addEventListener('click', () => specCycle(1));
+$('specexit').addEventListener('click', () => specStop());
 function onNet(m) {
   switch (m.t) {
     case 'welcome': NET.connected = true; NET.id = m.id; NET.hostId = m.hostId; NET.phase = m.phase; NET.ips = m.ips || []; NET.port = m.port; renderLobby(); break;
@@ -1727,6 +1824,7 @@ function onNet(m) {
       renderLobby(); break;
     }
     case 'start': startMatch(m); break;
+    case 'chat': addChat(m); break;
     case 'state': if (NET.on && m.id !== NET.id) getRemote(m.id, NET.names.get(m.id), true).push(m); break;
     case 'bots': if (NET.on && !NET.isHost) for (const s of m.b) getRemote(s.id, s.n, false).push(s); break;
     case 'shot': {
@@ -1772,6 +1870,7 @@ function onNet(m) {
       NET.alive = m.alive;
       const v = actorById.get(m.victim), by = m.by ? actorById.get(m.by) : null;
       if (v) deathVisual(v, by);
+      if (m.victim === NET.id && by) lastKiller = by;
       if (m.by === NET.id && m.victim !== NET.id) { player.kills++; killBanner(m.victimName); }
       const hn = (id, n) => (n && String(id).startsWith('p') ? `<b class="hn">${escapeHtml(n)}</b>` : n && escapeHtml(n));
       feed(deathText(hn(m.by, m.byName), m.w, hn(m.victim, m.victimName)), m.by === NET.id || m.victim === NET.id);
@@ -1838,6 +1937,7 @@ addEventListener('wheel', e => {
   for (let k = 1; k <= 3; k++) { const n = (player.cur + (e.deltaY > 0 ? k : 3 - k)) % 3; if (player.inv.slots[n]) { switchTo(n); break; } }
 });
 addEventListener('keydown', e => {
+  if (chatOpen || document.activeElement?.tagName === 'INPUT') return;
   if (state !== 'play' || !player || player.dead) return;
   if (invOpen && !['Tab', 'KeyE', 'Escape', 'KeyW', 'KeyA', 'KeyS', 'KeyD', 'ShiftLeft'].includes(e.code)) return;
   if (e.repeat && e.code !== 'KeyW') { if (['Space', 'KeyC'].includes(e.code)) e.preventDefault(); return; }
@@ -1886,7 +1986,7 @@ $('quit').addEventListener('click', e => {
 $('join').addEventListener('click', connectNet);
 $('mstart').addEventListener('click', () => NET.send({ t: 'start', bots: +$('botn').value }));
 $('botn').addEventListener('input', e => { e.target.dataset.touched = 1; });
-$('spectate').addEventListener('click', () => { $('end').classList.add('hidden'); });
+$('spectate').addEventListener('click', () => specStart());
 $('again').addEventListener('click', () => { try { sessionStorage.setItem('gh_rejoin', NET.connected || NET.on ? '1' : ''); } catch {} location.reload(); });
 $('pname').value = store.get('gh_name') || '';
 
@@ -1899,7 +1999,7 @@ function loop() {
   requestAnimationFrame(loop);
   const _t0 = performance.now();
   const dt = Math.min(clock.getDelta(), 0.05);
-  const running = (state === 'play' && (NET.on || TEST || invOpen || document.pointerLockElement === canvas)) || state === 'ending';
+  const running = (state === 'play' && (NET.on || TEST || invOpen || player?.dead || document.pointerLockElement === canvas)) || state === 'ending';
   if (state === 'play' || state === 'ending') {
     if (running) {
       now = NET.on ? (performance.now() - matchStart) / 1000 : now + dt;

@@ -198,6 +198,26 @@
   #lobbylist small{color:var(--dim);font-weight:400}
   #waitmsg{font-size:13px;color:var(--accent);font-weight:700}
   #hostctl button{margin-top:6px}
+  #chat{position:absolute;left:18px;bottom:190px;width:380px;display:flex;flex-direction:column;gap:6px}
+  #chatlog{display:flex;flex-direction:column;gap:3px;max-height:200px;overflow:hidden}
+  #chatlog div,#lobbylog div{font-size:14px;font-weight:700;text-shadow:0 2px 0 var(--ink),0 0 6px rgba(0,0,0,.7);transition:opacity 1s}
+  #chatlog div.old{opacity:0}
+  #chat.open #chatlog div.old{opacity:.85}
+  #chat.open #chatlog{background:rgba(10,16,30,.55);border-radius:10px;padding:6px 8px;overflow-y:auto}
+  #chatlog .sys,#lobbylog .sys{color:var(--accent)}
+  #chatin{pointer-events:auto;font:inherit;font-weight:700;padding:9px 12px;border-radius:10px;border:3px solid var(--ink);background:rgba(244,247,255,.95);color:#14203a}
+  #lobbychat{margin-top:10px}
+  #lobbylog{max-height:120px;overflow-y:auto;background:rgba(0,0,0,.25);border-radius:8px;padding:6px 8px;margin-bottom:6px;min-height:40px}
+  #lobbyin{width:100%}
+  #specbar{display:none;position:absolute;left:50%;bottom:30px;transform:translateX(-50%);align-items:center;gap:10px;pointer-events:auto}
+  #specbar>div{background:var(--panel);border:3px solid var(--ink);border-radius:14px;padding:6px 22px;text-align:center;min-width:240px;box-shadow:0 4px 0 rgba(0,0,0,.35)}
+  #specbar small{display:block;font-size:11px;font-weight:900;color:var(--dim);letter-spacing:.2em}
+  #specbar b{font-family:var(--disp);font-weight:400;font-size:26px}
+  #specbar b i{font-style:normal;font-family:var(--body);font-size:12px;background:#ff6b6b;color:#1a0505;border-radius:5px;padding:0 6px;vertical-align:middle}
+  #specbar span{display:block;font-size:12px;color:var(--accent);font-weight:900}
+  #specbar button{font-size:18px;padding:10px 16px}
+  #hud.spectating #specbar{display:flex}
+  #hud.spectating .bl,#hud.spectating .br,#hud.spectating #cross,#hud.spectating #prompt{display:none}
   #bigmap{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:min(80vh,80vw);height:min(80vh,80vw);border-radius:24px;border:5px solid var(--ink);box-shadow:0 10px 0 rgba(0,0,0,.4)}
 </style>
 <script type="importmap">
@@ -227,6 +247,8 @@
   <div id="zonebox"><div id="zonemsg">—</div></div>
   <canvas id="mini" width="400" height="400"></canvas>
   <div id="feed"></div>
+  <div id="chat"><div id="chatlog"></div><input id="chatin" class="hidden" maxlength="120" placeholder="메시지 입력 · Enter 전송 · Esc 취소" autocomplete="off"></div>
+  <div id="specbar"><button id="specprev" class="alt">◀</button><div><small>관전 중</small><b id="specname">-</b><span id="speccount"></span></div><button id="specnext" class="alt">▶</button><button id="specexit" class="alt">결과 보기</button></div>
   <div id="banner"></div>
   <div id="prompt" class="hidden"></div>
   <div id="toast"></div>
@@ -286,6 +308,7 @@
           <b>1 2 3</b><span>주무기 1 · 주무기 2 · 권총 (휠도 가능)</span>
           <b>Q</b><span>회복 (붕대 / 구급상자 자동 선택)</span>
           <b>M</b><span>전체 지도 · <kbd>Esc</kbd> 일시정지</span>
+          <b>Enter</b><span>채팅 (멀티) · 죽은 뒤 <kbd>◀</kbd> <kbd>▶</kbd> 관전 대상 변경</span>
         </div>
       </div>
       <label class="sens">마우스 감도 <input type="range" id="sens" min="0.5" max="3" step="0.1" value="1.2"></label>
@@ -303,6 +326,7 @@
           <button id="mstart">경기 시작</button>
         </div>
         <div id="waitmsg"></div>
+        <div id="lobbychat"><div id="lobbylog"></div><input id="lobbyin" class="field" maxlength="120" placeholder="로비 채팅 · Enter 전송" autocomplete="off"></div>
         <button id="leavelobby" class="alt" style="margin-top:10px;font-size:15px;padding:8px 18px">로비 나가기</button>
       </div>
     </div>
